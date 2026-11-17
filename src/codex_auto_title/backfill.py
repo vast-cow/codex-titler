@@ -20,6 +20,7 @@ class Backfill(Monitor):
         self.eligible = set()
         self.enumeration_complete = False
         self.error = None
+        self.created_at = {}
 
     def event(self, method, params):
         # Only the scan enrolls candidates; helper/new-source broadcasts cannot.
@@ -47,6 +48,9 @@ class Backfill(Monitor):
                     if tid in self.candidates:
                         continue
                     c = self.candidates[tid] = Candidate()
+                    # Keep first-seen metadata, matching candidate deduplication.
+                    created = t.get("createdAt")
+                    self.created_at[tid] = created if type(created) is int else None
                     if (
                         t.get("ephemeral") is not False
                         or t.get("forkedFromId")
@@ -62,6 +66,14 @@ class Backfill(Monitor):
             for c in self.candidates.values():
                 if not c.done:
                     c.finish("deferred", "enumeration incomplete; no titles written")
+
+    def order_key(self, tid):
+        created = self.created_at[tid]
+        # Unknown times always follow known times; IDs break ties in both modes.
+        timestamp = created if created is not None else 0
+        if self.s.backfill_order == "newest-first":
+            timestamp = -timestamp
+        return (created is None, timestamp, tid)
 
     async def worker(self, queue):
         while not queue.empty():
@@ -100,9 +112,11 @@ class Backfill(Monitor):
         try:
             await self.scan()
             queue = asyncio.Queue()
-            for tid, c in self.candidates.items():
-                if not c.done:
-                    queue.put_nowait(tid)
+            # Sort globally only after every page has been enumerated. Do not
+            # depend on the server's list order or sort individual pages.
+            pending = (tid for tid, c in self.candidates.items() if not c.done)
+            for tid in sorted(pending, key=self.order_key):
+                queue.put_nowait(tid)
             async with asyncio.TaskGroup() as group:
                 for _ in range(self.s.workers):
                     group.create_task(self.worker(queue))

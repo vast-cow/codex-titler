@@ -342,3 +342,64 @@ async def test_batch_cancellation_still_propagates():
     finally:
         session.cancel()
         await asyncio.gather(session, return_exceptions=True)
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+@pytest.mark.parametrize(
+    "order,expected",
+    [
+        (None, ["newest", "middle", "oldest"]),
+        ("newest-first", ["newest", "middle", "oldest"]),
+        ("oldest-first", ["oldest", "middle", "newest"]),
+    ],
+)
+async def test_global_scheduling_order(order, expected, workers, monkeypatch):
+    started = []
+    options = {"backfill_order": order} if order else {}
+    b = backfill(workers=workers, **options)
+    rpc = ScanRPC(
+        [
+            [thread("middle", createdAt=20), thread("oldest", createdAt=10)],
+            [thread("newest", createdAt=30), thread("middle", createdAt=999)],
+            [thread("excluded", createdAt=100, ephemeral=True)],
+        ]
+    )
+
+    async def process(tid):
+        assert b.enumeration_complete
+        assert len([k for k, _ in rpc.calls if k == "thread/list"]) == 3
+        started.append(tid)
+        await asyncio.sleep(0)
+        b.candidates[tid].finish("named")
+
+    monkeypatch.setattr(b, "process", process)
+    await b.session(rpc)
+    assert started == expected
+    assert b.candidates["excluded"].phase == "ineligible"
+    assert len(b.candidates) == 4
+
+
+@pytest.mark.parametrize("order", ["newest-first", "oldest-first"])
+@pytest.mark.parametrize("reverse", [False, True])
+async def test_timestamp_ties_and_unknowns(order, reverse, monkeypatch):
+    rows = [
+        thread("tie-b", createdAt=0),
+        thread("tie-a", createdAt=0),
+        {"id": "missing", "ephemeral": False},
+        thread("null", createdAt=None),
+        thread("string", createdAt="100"),
+        thread("bool", createdAt=True),
+        thread("float", createdAt=1.5),
+    ]
+    if reverse:
+        rows.reverse()
+    b = backfill(workers=1, backfill_order=order)
+    started = []
+
+    async def process(tid):
+        started.append(tid)
+        b.candidates[tid].finish("named")
+
+    monkeypatch.setattr(b, "process", process)
+    await b.session(ScanRPC([rows[:3], rows[3:]]))
+    assert started == ["tie-a", "tie-b", "bool", "float", "missing", "null", "string"]

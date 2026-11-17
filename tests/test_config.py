@@ -90,3 +90,34 @@ def test_ephemeral_project_path_from_toml(tmp_path, project_path):
     path.write_text(contents)
     settings, _ = load(["--config", str(path)])
     assert settings.ephemeral_project_path == (project_path or "/tmp")
+
+
+def test_backfill_order_default():
+    assert Settings(endpoint="ws://localhost").backfill_order == "newest-first"
+    assert load(["--endpoint", "ws://localhost"])[0].backfill_order == "newest-first"
+
+
+@pytest.mark.parametrize("order", ["newest-first", "oldest-first"])
+def test_backfill_order_config_and_cli_precedence(tmp_path, order):
+    path = tmp_path / "titler.toml"
+    path.write_text(
+        f'[titler]\nendpoint = "ws://localhost"\nbackfill_order = "{order}"\n'
+    )
+    assert load(["--config", str(path)])[0].backfill_order == order
+    override = "oldest-first" if order == "newest-first" else "newest-first"
+    settings, _ = load(["--config", str(path), "--backfill-order", override])
+    assert settings.backfill_order == override
+
+
+@pytest.mark.parametrize("source", ["cli", "toml"])
+def test_invalid_backfill_order(tmp_path, source):
+    args = ["--endpoint", "ws://localhost"]
+    if source == "cli":
+        args += ["--backfill-order", "random"]
+    else:
+        path = tmp_path / "titler.toml"
+        path.write_text('[titler]\nbackfill_order = "random"\n')
+        args += ["--config", str(path)]
+    with pytest.raises(SystemExit) as exc:
+        load(args)
+    assert exc.value.code == 2

@@ -17,6 +17,11 @@ def load(argv=None):
     )
     parser.add_argument("--config", type=Path, help="TOML file with a [titler] table")
     parser.add_argument("--estimation-policy", choices=["utf8_bytes", "exact_only"])
+    parser.add_argument(
+        "--backfill-order",
+        choices=["newest-first", "oldest-first"],
+        help="backfill scheduling order by creation time (default: newest-first)",
+    )
     for name in ("endpoint", "unix-uri", "token-env", "provider"):
         parser.add_argument("--" + name)
     for name in (

@@ -10,7 +10,7 @@ uv run codex-auto-title --endpoint ws://127.0.0.1:4500
 uv run codex-auto-title --endpoint wss://codex.example.com --token-env CODEX_SERVER_TOKEN
 ```
 
-Use `--backfill-once` to title eligible existing unarchived threads and exit; continuous monitoring remains the default. See [backfill scope and exit status](docs/usage.md#one-time-backfill).
+Use `--backfill-once` to title eligible existing unarchived threads and exit, scheduling newest-created threads first by default. Use `--backfill-order oldest-first` to reverse the creation-time order. Continuous monitoring remains the default. See [backfill scope, ordering and exit status](docs/usage.md#one-time-backfill).
 
 The Unix listener must speak WebSocket, including HTTP Upgrade. It is not a JSON-lines socket. The utility never starts another server. `wss://` uses certificate verification.
 

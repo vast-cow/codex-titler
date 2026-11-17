@@ -13,6 +13,7 @@ ephemeral_project_path = "/tmp"
 request_timeout = 30
 generation_timeout = 180
 workers = 2
+backfill_order = "newest-first" # or "oldest-first"; only affects backfill
 max_message_bytes = 67108864
 max_title_length = 80
 safety_tokens = 8192
@@ -91,6 +92,7 @@ Use the same endpoint as the intended UI; the script verifies broadcast detectio
 
 ```sh
 uv run codex-auto-title --endpoint unix:///absolute/path/to/app-server.sock --backfill-once
+uv run codex-auto-title --config titler.toml --backfill-once --backfill-order oldest-first
 # Or use your existing --config FILE with --backfill-once.
 ```
 
@@ -104,6 +106,17 @@ permissions expose. It does not search other servers, accounts, or local files.
 Pagination is a moving server view, not an atomic snapshot: threads created or
 changed during traversal may appear or be missed. After enumeration, new threads
 are outside this run.
+
+`backfill_order = "newest-first"` (default) schedules threads with the most recent
+`createdAt` Unix timestamp first. Use `"oldest-first"` to schedule the oldest first;
+CLI `--backfill-order` overrides the TOML setting. Sorting covers the entire
+deduplicated population after all pages have been collected, independently of
+the order returned by `thread/list`. Duplicate IDs retain their first-seen list
+metadata. Equal creation times are ordered by ascending thread ID. Missing, null,
+or invalid timestamps (anything other than an integer) follow all known times
+in either mode, also ordered by ascending ID. These rules determine scheduling
+order; concurrent workers may finish in a different order. Retries remain with
+the worker owning that thread. This setting has no effect on continuous monitoring.
 
 Only a metadata read with an explicitly null name permits generation. Existing
 names, including empty strings, are preserved. Ephemeral helpers, forks, children,

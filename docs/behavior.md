@@ -123,6 +123,14 @@ rechecks thread type and explicit-null name before capture. Names are reread
 immediately before mutation, and ambiguous mutations retain their intent for
 bounded readback using the same workflow.
 
+After complete enumeration, pending candidates are sorted globally by the
+first-seen list `createdAt` integer timestamp: descending for
+`backfill_order = "newest-first"` (default), ascending for `"oldest-first"`. Ascending thread IDs
+break ties; missing or invalid timestamps come last in both modes, sorted by ID.
+The FIFO work queue uses this order independently of server pagination order.
+Workers retain ownership through retries and delays, so this guarantees initial
+scheduling order, while concurrent completion order can differ.
+
 This mode terminates no-input waits and bounds otherwise indefinite connection
 and reconciliation retries. The existing running-source capture delay is retained.
 The scan and each history retrieval use `max_pages`; individual RPCs and helper

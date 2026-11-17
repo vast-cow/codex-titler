@@ -291,9 +291,7 @@ async def test_manual_name_cancels_inflight_work_and_preserves_outcome(
         await asyncio.wait_for(entered.wait(), 1)
         assert "s" in b.jobs
         rpc.name = "Manual name"
-        rpc.emit(
-            "thread/name/updated", {"threadId": "s", "threadName": rpc.name}
-        )
+        rpc.emit("thread/name/updated", {"threadId": "s", "threadName": rpc.name})
         await asyncio.wait_for(session, 1)
     finally:
         session.cancel()

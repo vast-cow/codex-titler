@@ -15,6 +15,7 @@ log = logging.getLogger(__name__)
 
 class RpcError(Exception):
     def __init__(self, error):
+        self.payload = error
         super().__init__(json.dumps(error) if isinstance(error, dict) else error)
         data = error.get("data") if isinstance(error, dict) else None
         self.context_size = (
@@ -90,7 +91,10 @@ class RPC:
 
     async def send(self, message):
         try:
-            await self.ws.send(json.dumps(message))
+            async with asyncio.timeout(self.timeout):
+                await self.ws.send(json.dumps(message))
+        except TimeoutError:
+            raise
         except Exception as exc:
             raise Disconnected(
                 "WebSocket send failed; mutation outcome may be unknown"
@@ -102,12 +106,15 @@ class RPC:
         future = asyncio.get_running_loop().create_future()
         self.pending[request_id] = future
         try:
-            await self.send(
-                {"id": request_id, "method": method, "params": params or {}}
-            )
-            return await asyncio.wait_for(future, self.timeout)
+            async with asyncio.timeout(self.timeout):
+                await self.send(
+                    {"id": request_id, "method": method, "params": params or {}}
+                )
+                return await future
         finally:
             self.pending.pop(request_id, None)
+            if not future.done():
+                future.cancel()
 
     async def initialize(self):
         result = await self.request(

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .config import MODEL
 from .history import Deferred, encode, pages, representation
+from .lifecycle import AttemptState, Exhausted
 from .rpc import RpcError
 
 log = logging.getLogger(__name__)
@@ -153,14 +154,20 @@ class Generator:
 
     async def attempt(self, prompt, probe=False, schema=None, overrides=None):
         # Listener registration precedes both creation and turn/start responses.
+        if probe:
+            self.last_discovery = None
         completed, usage, messages = {}, {}, {}
         signal = asyncio.Event()
         helper_id, turn_id = None, None
         started_turns = {}
+        reroutes = {}
 
         def event(method, p):
             tid = p.get("threadId")
-            if method == "turn/started":
+            if method == "model/rerouted":
+                if p.get("toModel") != MODEL:
+                    reroutes[(tid, p.get("turnId"))] = dict(p)
+            elif method == "turn/started":
                 started_turns[tid] = p["turn"]["id"]
             elif method == "thread/tokenUsage/updated":
                 usage[tid] = p["tokenUsage"]
@@ -207,14 +214,33 @@ class Generator:
             async with asyncio.timeout(self.s.generation_timeout):
                 while (helper_id, turn_id) not in completed:
                     signal.clear()
+                    if (helper_id, turn_id) in reroutes:
+                        raise Deferred(
+                            f"required model {MODEL} not met: rerouted {reroutes[(helper_id, turn_id)]}"
+                        )
                     if self.rpc.closed.is_set():
                         raise RpcError("disconnected during helper turn")
                     # Wake periodically for disconnects without spawning another receiver.
                     with suppress(TimeoutError):
                         await asyncio.wait_for(signal.wait(), 1)
+            if (helper_id, turn_id) in reroutes:
+                raise Deferred(
+                    f"required model {MODEL} not met: rerouted {reroutes[(helper_id, turn_id)]}"
+                )
             turn = completed[(helper_id, turn_id)]
             if turn["status"] != "completed":
-                raise GenerationFailure(turn.get("error") or {"status": turn["status"]})
+                error = turn.get("error") or {"status": turn["status"]}
+                info = error.get("codexErrorInfo")
+                if isinstance(info, str) and info in {
+                    "unauthorized",
+                    "modelNotFound",
+                    "badRequest",
+                    "inferenceHookDenied",
+                }:
+                    raise Deferred(
+                        f"unsupported helper configuration/authentication: {encode(error)}"
+                    )
+                raise GenerationFailure(error)
             if probe:
                 u = usage.get(helper_id, {})
                 window = u.get("modelContextWindow")
@@ -274,17 +300,22 @@ class Generator:
                     )
             self.rpc.listeners.discard(event)
 
-    async def generate(self, snapshot):
+    async def generate(self, snapshot, state=None):
+        state = state if state is not None else AttemptState()
+        state.check(self.s)
+        # Locally knowable policy failures must not spend a model invocation.
+        count = await asyncio.to_thread(tokenizer, self.s)
         await self.verify_model()
         overrides = await self.configure_capabilities()
         schema = Title.model_json_schema()
         schema["properties"]["title"]["maxLength"] = self.s.max_title_length
         # Probe with identical effective configuration and output schema. No persistent cache:
         # every job discovers again, including after provider/auth/config changes.
+        state.probes += 1
+        self.last_discovery = None
         window, overhead = await self.attempt(
             'Return {"title":"Probe"}.', probe=True, schema=schema, overrides=overrides
         )
-        count = tokenizer(self.s)
         log.info(
             "input sizing method=%s verified_mapping=%s context_fraction=%s",
             count.method,
@@ -298,16 +329,23 @@ class Generator:
             - self.s.output_reserve
             - count(encode(schema))
         )
+        if state.budget_ceiling is not None:
+            budget = min(budget, state.budget_ceiling)
         if budget <= 0:
             raise Deferred("discovered context limit leaves no safe history budget")
-        for attempt in range(self.s.context_retries + 1):
-            prompt = representation(snapshot, count, budget)
+        while state.generations < self.s.generation_attempts:
+            prompt = await asyncio.to_thread(representation, snapshot, count, budget)
+            state.generations += 1
             try:
                 title = await self.attempt(prompt, schema=schema, overrides=overrides)
-                validate_language(snapshot, title)
+                await asyncio.to_thread(validate_language, snapshot, title)
                 return title
             except RpcError as exc:
-                if not exc.context_size or attempt == self.s.context_retries:
+                if not exc.context_size:
                     raise
-                budget = min(budget // 2, count(prompt) // 2)
-        raise Deferred("context retries exhausted")
+                if state.context_retries >= self.s.context_retries:
+                    raise Exhausted("candidate context retries exhausted") from exc
+                state.context_retries += 1
+                budget = min(budget // 2, await asyncio.to_thread(count, prompt) // 2)
+                state.budget_ceiling = budget
+        raise Exhausted("candidate generation attempts exhausted")

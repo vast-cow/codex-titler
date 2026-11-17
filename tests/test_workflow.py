@@ -176,7 +176,7 @@ async def test_manual_rename_and_snapshot_stability():
     rpc = FakeRPC()
     m = monitor(rpc)
 
-    async def generate(snap):
+    async def generate(snap, state):
         before = snap.raw_json
         rpc.turns.append(turn(2, "new activity"))
         rpc.name = "Manual"
@@ -194,7 +194,7 @@ async def test_ambiguous_rename_reconciles_without_replaying():
     rpc.ambiguous = True
     m = monitor(rpc)
 
-    async def generate(_):
+    async def generate(_, state):
         return "Generated"
 
     m.generator = SimpleNamespace(generate=generate)
@@ -295,9 +295,15 @@ async def test_session_reinitializes_without_adopting_historical_threads():
     rpc = SessionRPC()
     m = monitor(rpc)
     m.candidates["s"].title = "uncertain retained title"
+    m.candidates["s"].attempts.probes = 1
+    m.candidates["s"].attempts.generations = 2
+    m.candidates["s"].attempts.context_retries = 1
     await m.session(rpc)
     await m.session(rpc)
     assert rpc.initialized == 2
+    assert m.candidates["s"].attempts.probes == 1
+    assert m.candidates["s"].attempts.generations == 2
+    assert m.candidates["s"].attempts.context_retries == 1
     assert m.candidates["s"].title == "uncertain retained title"
     assert "historical" in m.known
     assert "historical" not in m.candidates
@@ -327,9 +333,10 @@ async def test_generate_defers_without_context_even_with_approximation(monkeypat
     rpc = FakeRPC(window=None)
     m = monitor(rpc)
     await m.process("s")
-    assert not m.candidates["s"].done
+    assert m.candidates["s"].done
+    assert m.candidates["s"].phase == "unsupported"
     assert rpc.helpers == 1
-    assert m.candidates["s"].snapshot is not None
+    assert m.candidates["s"].snapshot is None
     assert not any(k == "thread/name/set" for k, _ in rpc.calls)
 
 
@@ -404,6 +411,7 @@ async def test_japanese_language_guard_ignores_english_code_before_rename():
     )
     m = monitor(rpc)
     await m.process("s")
-    assert m.candidates["s"].snapshot is not None
-    assert not m.candidates["s"].done
+    assert m.candidates["s"].snapshot is None
+    assert m.candidates["s"].done
+    assert m.candidates["s"].phase == "unsupported"
     assert not any(k == "thread/name/set" for k, _ in rpc.calls)

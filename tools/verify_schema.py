@@ -60,6 +60,10 @@ def main():
             "modelContextWindow"
             in schema["definitions"]["ThreadTokenUsage"]["properties"]
         )
+        schema = json.loads((root / "ModelReroutedNotification.json").read_text())
+        assert {"threadId", "turnId", "fromModel", "toModel", "reason"} <= schema[
+            "properties"
+        ].keys()
         schema = json.loads((root / "ThreadTurnsListResponse.json").read_text())
         assert any(
             "full" in view.get("enum", [])

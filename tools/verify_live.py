@@ -82,13 +82,14 @@ async def verify(settings):
                 name = readback["thread"]["name"]
                 assert name == candidate.title and isinstance(name, str)
                 assert re.search(r"[\u3040-\u30ff\u3400-\u9fff]", name), name
-                assert candidate.snapshot is not None
+                assert candidate.snapshot is None
+                assert candidate.snapshot_sha256 is not None
                 result = {
                     "endpoint": settings.endpoint,
                     "server": server["userAgent"],
                     "authenticated": True,
                     "source_thread": tid,
-                    "snapshot_sha256": candidate.snapshot.sha256,
+                    "snapshot_sha256": candidate.snapshot_sha256,
                     "discovery": monitor.generator.last_discovery,
                     "title": name,
                     "japanese_script_check": True,

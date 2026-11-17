@@ -70,3 +70,50 @@ async def test_missing_socket(tmp_path):
     with pytest.raises(RpcError, match="socket missing"):
         async with connection(Settings(endpoint="unix://" + str(tmp_path / "missing"))):
             pass
+
+
+async def test_blocked_send_and_initialization_notification_are_bounded():
+    class Blocked:
+        async def send(self, message):
+            await asyncio.Event().wait()
+
+    rpc = RPC(Blocked(), 0.02)
+    async with asyncio.timeout(0.5):
+        with pytest.raises(TimeoutError):
+            await rpc.request("thread/name/set", {"threadId": "s", "name": "Title"})
+        assert not rpc.pending
+        with pytest.raises(TimeoutError):
+            await rpc.initialize()
+
+    class InitNotificationBlocked:
+        async def send(self, raw):
+            message = json.loads(raw)
+            if message["method"] == "initialize":
+                rpc.pending[message["id"]].set_result({"userAgent": "mock"})
+            else:
+                await asyncio.Event().wait()
+
+    rpc = RPC(InitNotificationBlocked(), 0.02)
+    async with asyncio.timeout(0.5):
+        with pytest.raises(TimeoutError):
+            await rpc.initialize()
+
+
+async def test_request_deadline_includes_send_time():
+    class SlowSend:
+        async def send(self, message):
+            request_id = json.loads(message)["id"]
+            await asyncio.sleep(0.03)
+
+            def respond():
+                future = rpc.pending.get(request_id)
+                if future is not None and not future.done():
+                    future.set_result({})
+
+            asyncio.get_running_loop().call_later(0.035, respond)
+
+    rpc = RPC(SlowSend(), 0.05)
+    # The response would fit a fresh post-send timeout, but misses the total deadline.
+    with pytest.raises(TimeoutError):
+        await rpc.request("read")
+    assert not rpc.pending

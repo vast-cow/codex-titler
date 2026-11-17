@@ -3,11 +3,12 @@ import logging
 import math
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .generation import Generator
-from .history import Deferred, Snapshot, capture, pages
-from .rpc import RPC, connection
+from .history import Deferred, Snapshot, Waiting, capture, pages
+from .lifecycle import AttemptState, Exhausted
+from .rpc import RPC, RpcError, connection
 
 log = logging.getLogger(__name__)
 
@@ -18,6 +19,19 @@ class Candidate:
     title: str | None = None
     done: bool = False
     retry_at: float = 0
+    attempts: AttemptState = field(default_factory=AttemptState)
+    failures: int = 0
+    writes: int = 0
+    rename_uncertain: bool = False
+    phase: str = "waiting"
+    reason: str | None = None
+    snapshot_sha256: str | None = None
+
+    def finish(self, phase, reason=None):
+        self.done = True
+        self.phase, self.reason = phase, reason[:1000] if reason else None
+        self.snapshot = None
+        self.rename_uncertain = False
 
 
 class Monitor:
@@ -49,12 +63,14 @@ class Monitor:
         elif method == "thread/name/updated" and params.get("threadName") is not None:
             tid = params["threadId"]
             candidate = self.candidates.get(tid)
-            if candidate and candidate.title == params["threadName"]:
-                # Our own broadcast can precede the name-set acknowledgement.
-                # Keep the worker alive to read back the result.
+            if candidate and (
+                candidate.title == params["threadName"] or candidate.rename_uncertain
+            ):
+                # Broadcasts can precede acknowledgement. Resolve uncertain writes
+                # by readback, including notifications of a competing manual name.
                 return
             if candidate:
-                candidate.done = True
+                candidate.finish("named_elsewhere")
             job = self.jobs.get(tid)
             if job:
                 job.cancel()
@@ -72,53 +88,117 @@ class Monitor:
 
     async def process(self, tid):
         candidate = self.candidates[tid]
+        if candidate.done:
+            return
         try:
             t = await self.metadata(tid)
             if t.get("ephemeral") is not False or t["name"] is not None:
-                candidate.done = True
-                return
-            if candidate.snapshot is None:
-                snap = await capture(self.rpc, tid, self.s.max_pages)
-                if not any(snap.user_messages):
-                    raise Deferred("empty thread; waiting for meaningful user input")
-                if not snap.turns:
-                    raise Deferred("waiting for first completed turn")
-                candidate.snapshot = snap
-                log.info(
-                    "snapshot thread=%s hash=%s turns=%d interval=%.3f..%.3f",
-                    tid,
-                    snap.sha256,
-                    len(snap.turns),
-                    snap.started,
-                    snap.finished,
+                candidate.finish(
+                    "named"
+                    if candidate.title is not None and candidate.title == t["name"]
+                    else "ineligible"
                 )
+                return
+            # A successful read of explicit null resolves any previous uncertain write.
+            candidate.rename_uncertain = False
             if candidate.title is None:
-                candidate.title = await self.generator.generate(candidate.snapshot)
+                candidate.attempts.check(self.s)
+                if candidate.snapshot is None:
+                    snap = await capture(self.rpc, tid, self.s.max_pages)
+                    ready = await asyncio.to_thread(
+                        lambda: bool(snap.boundaries) and any(snap.user_messages)
+                    )
+                    if not ready:
+                        raise Waiting(
+                            "waiting for meaningful user input and a terminal turn"
+                        )
+                    candidate.snapshot = snap
+                    candidate.snapshot_sha256 = snap.sha256
+                    log.info("snapshot thread=%s hash=%s", tid, snap.sha256)
+                candidate.phase = "generating"
+                candidate.title = await self.generator.generate(
+                    candidate.snapshot, candidate.attempts
+                )
+                # No further history is needed, even if the eventual write is ambiguous.
+                candidate.snapshot = None
             t = await self.metadata(tid)
             if candidate.done or t["name"] is not None:
-                candidate.done = True
+                candidate.finish("named_elsewhere")
                 return
-            # Preserve title BEFORE sending. A disconnect/timeout triggers a reread on the
-            # next pass; never automatically replay a mutation inside the RPC client.
+            if candidate.writes >= self.s.transient_failures:
+                raise Exhausted(
+                    "candidate name-write attempts exhausted after null readback"
+                )
+            candidate.writes += 1
+            candidate.phase = "reconciling"
+            candidate.rename_uncertain = True
+            # Save intent before sending; timeouts include blocked sends and remain uncertain.
             await self.rpc.request(
                 "thread/name/set", {"threadId": tid, "name": candidate.title}
             )
             confirmed = await self.metadata(tid)
             if confirmed["name"] is None:
-                raise Deferred(
-                    "name-set acknowledged but readback is null; retain rename intent"
-                )
-            candidate.done = True
+                candidate.rename_uncertain = False
+                raise RpcError("name-set acknowledged but readback is null")
+            candidate.finish(
+                "named" if confirmed["name"] == candidate.title else "named_elsewhere"
+            )
             log.info(
                 "name readback thread=%s matches=%s",
                 tid,
                 confirmed["name"] == candidate.title,
             )
         except asyncio.CancelledError:
+            if candidate.done:
+                candidate.snapshot = None
             raise
+        except Waiting as exc:
+            candidate.phase, candidate.reason = "waiting", str(exc)[:1000]
+        except Exhausted as exc:
+            candidate.finish("exhausted", str(exc))
+        except (Deferred, ValueError) as exc:
+            if candidate.rename_uncertain:
+                candidate.phase, candidate.reason = "reconciling", str(exc)[:1000]
+            else:
+                candidate.finish("unsupported", str(exc))
         except Exception as exc:
-            candidate.retry_at = time.monotonic() + max(30, self.s.poll_seconds)
-            log.warning("deferred thread=%s: %s", tid, exc)
+            candidate.failures += 1
+            candidate.reason = str(exc)[:1000]
+            # An unresolved write is reconciled with reads only. Keep compact intent,
+            # even when transport failure budgets are exhausted; never regenerate.
+            if candidate.rename_uncertain:
+                candidate.phase = "reconciling"
+            elif candidate.failures >= self.s.transient_failures:
+                candidate.finish("exhausted", str(exc))
+            elif (
+                isinstance(exc, RpcError)
+                and isinstance(exc.payload, dict)
+                and exc.payload.get("code") in (-32600, -32601, -32602)
+            ):
+                candidate.finish("unsupported", str(exc))
+            else:
+                candidate.phase = "transient"
+                if candidate.title is None:
+                    try:
+                        candidate.attempts.check(self.s)
+                    except Exhausted as exhausted:
+                        candidate.finish("exhausted", str(exhausted))
+        finally:
+            if candidate.done:
+                log.info(
+                    "terminal thread=%s phase=%s reason=%s",
+                    tid,
+                    candidate.phase,
+                    candidate.reason,
+                )
+            else:
+                candidate.retry_at = time.monotonic() + max(30, self.s.poll_seconds)
+                log.warning(
+                    "deferred thread=%s phase=%s: %s",
+                    tid,
+                    candidate.phase,
+                    candidate.reason,
+                )
 
     async def session(self, rpc):
         self.rpc = rpc

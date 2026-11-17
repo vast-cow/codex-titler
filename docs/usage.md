@@ -17,6 +17,8 @@ max_title_length = 80
 safety_tokens = 8192
 output_reserve = 4096
 context_retries = 2
+generation_attempts = 3
+transient_failures = 3
 estimation_policy = "utf8_bytes" # or "exact_only"
 estimate_multiplier = 1.25
 context_fraction = 0.8
@@ -37,9 +39,15 @@ Configuration is validated with Pydantic; unknown keys and invalid values fail e
 
 `unix_uri` controls the HTTP Upgrade URI, independently of the decoded absolute socket path in `endpoint`. For TCP use `ws://HOST:PORT/PATH` or `wss://HOST/PATH`; TLS uses the platform trust store with hostname verification. Unix socket availability and permissions are reported with corrective guidance. Windows needs an available AF_UNIX implementation or TCP.
 
-WebSocket frames are capped at `max_message_bytes` (64 MiB initially). Oversized responses disconnect and defer the incomplete job. Increase the cap if full history pages require it; an individual server item can exceed the cap even with small page sizes. Requests, handshakes and generation have finite timeouts. Ctrl-C cancels workers, attempts helper interruption/unsubscription and closes the connection.
+WebSocket frames are capped at `max_message_bytes` (64 MiB initially). Oversized responses disconnect and defer the incomplete job. Increase the cap if full history pages require it; an individual server item can exceed the cap even with small page sizes. Requests have a deadline covering send plus response; standalone initialization sends, handshakes and generation also have finite timeouts. Ctrl-C cancels workers, attempts helper interruption/unsubscription and closes the connection.
 
-Deferred jobs log their reason and retry no faster than every 30 seconds. There is no encoding alias, model fallback or hard-coded context limit. The default approximation permits generation without a verified tokenizer mapping; missing runtime context still defers. `--estimation-policy`, `--estimate-multiplier` and `--context-fraction` override the TOML values. See the [budget policy](behavior.md#generation) for assumptions and reserves.
+Waiting/transient jobs log their phase and retry no faster than every 30 seconds.
+Terminal unsupported/exhausted candidates do not retry. `generation_attempts` caps
+lifetime probes and title turns separately; `context_retries` and
+`transient_failures` never reset on polling or reconnect. The latter also caps
+source name writes; unresolved writes retain only compact intent for readback.
+CLI switches `--generation-attempts` and `--transient-failures` override these values.
+See [candidate policy](behavior.md#candidate-retry-and-retention-policy). There is no encoding alias, model fallback or hard-coded context limit. The default approximation permits generation without a verified tokenizer mapping; missing runtime context still defers. `--estimation-policy`, `--estimate-multiplier` and `--context-fraction` override the TOML values. See the [budget policy](behavior.md#generation) for assumptions and reserves.
 
 To run the opt-in live smoke test (creates and retains one named synthetic source thread, plus ephemeral helpers):
 

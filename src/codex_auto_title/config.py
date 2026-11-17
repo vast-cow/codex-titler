@@ -23,6 +23,8 @@ class Settings(BaseModel):
     estimation_policy: Literal["utf8_bytes", "exact_only"] = "utf8_bytes"
     estimate_multiplier: float = Field(default=1.25, ge=1, le=10)
     context_fraction: float = Field(default=0.8, gt=0, le=1)
+    generation_attempts: int = Field(default=3, ge=1, le=20)
+    transient_failures: int = Field(default=3, ge=1, le=20)
     context_retries: int = Field(default=2, ge=0, le=5)
     reconnect_max: float = Field(default=30, ge=1)
     poll_seconds: float = Field(default=10, gt=0)

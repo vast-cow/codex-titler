@@ -1,6 +1,6 @@
 # Compatibility evidence
 
-Validation date: 2026-11-17. Starting repository state was clean at `95cbffb`.
+Validation date: 2026-11-17. This review follow-up started with a clean repository at `5234bdb`.
 Installed and connected App Servers report Codex 0.169.0. No isolated App Server
 was started, and no credentials, socket links or server configuration were changed.
 
@@ -11,9 +11,18 @@ loopback TCP and AF_UNIX WebSocket mock servers (including HTTP Upgrade). These
 checks cover approximate sizing without a tokenizer mapping, missing runtime
 context deferral, frozen snapshots, bounded context retries, non-context errors,
 server-managed retries, name races and readback. They do not establish provider
-availability. Final validation: **53 tests passed**; Ruff lint and formatting passed.
-Run `uv run pytest`, `uv run ruff check src tests tools`, and
-`uv run ruff format --check src tests tools`.
+availability. Final validation: **73 tests passed**; Ruff lint and formatting passed.
+Run `uv run --locked pytest`, `uv run --locked ruff check src tests tools`, and
+`uv run --locked ruff format --check src tests tools`.
+
+New focused offline regressions cover lifetime exhaustion through repeated polls
+and fresh connection generators, retained counters through session reinitialization,
+unbudgeted empty/running-thread waits, exact-only preflight without RPC calls,
+terminal payload release, uncertain writes without history/regeneration, blocked
+sends and shared send/response deadlines, reroutes before both thread and turn
+acknowledgements and after acknowledgements, asynchronous progress during large
+history preparation, and early termination after the representation budget fills.
+Mock reroutes are not evidence of an actual provider rerouting event.
 
 The installed binary's experimental schema was checked again with:
 
@@ -23,7 +32,7 @@ uv run python tools/verify_schema.py /path/to/codex
 
 Checked fields include `TurnStartParams.effort`, ephemeral creation, full turn
 pagination, name setting, helper unsubscription and
-`ThreadTokenUsage.modelContextWindow`. Schema presence alone is not runtime
+`ThreadTokenUsage.modelContextWindow` and all `ModelReroutedNotification` identity/model fields. Schema presence alone is not runtime
 context evidence.
 
 ## Tokenizer and estimation evidence
@@ -62,7 +71,46 @@ successful run on one endpoint does not establish visibility of another
 process's live UI events. No claim is made that an unrelated UI shares either
 connection, nor was a manually clicked UI thread used for this test.
 
-## Actual Unix generation and rename
+## Live rerun after lifecycle hardening
+
+Both existing endpoints were tested again with the updated `verify_live.py`. Each
+run authenticated, detected an API-created synthetic source on an independent
+observer connection, waited for user content, froze history, discovered runtime
+context with an ephemeral Luna/low/openai probe, generated a Japanese title,
+rechecked the null name, set it and confirmed it by utility and independent-client
+readback. The helper also asserts that the completed candidate's snapshot has been
+released and reports its compact hash. No isolated server or actual UI was used.
+
+| Evidence | AF_UNIX desktop | TCP web-local |
+| --- | --- | --- |
+| Source thread | `01a1e7de-d3cf-7eb3-ab49-cddd714daee2` | `01a1e7de-d430-7d81-957e-1e70a8ee848c` |
+| Probe helper | `01a1e7df-49f9-7322-8f2e-3a51588d2ec0` | `01a1e7df-4aa5-7552-95d7-485d807c7178` |
+| Probe turn | `01a1e7df-4a2d-79f1-b970-7fb2dfae88a2` | `01a1e7df-4ad8-7060-baf0-8dfa6a9b2767` |
+| Context limit | **258400** | **258400** |
+| Probe input tokens | **6881** | **6881** |
+| Actual title | ログ出力が多いPython処理の速度改善 | Pythonのログ出力による処理速度低下の調査 |
+
+Runtime provenance is `thread/tokenUsage/updated`, with model/provider/effort
+confirmed by helper creation; no source-thread context value was used.
+Snapshot hashes retained after payload release:
+
+- AF_UNIX: `7a92380b687b09f9b433b2453e8a08fc06c3119a1cefb058c4dcf749b7c5d5e0`
+- TCP: `6e35deaf4b2336fa3ffa93772a679beee58c1655ddf6ba64a4bcd8a6fcb0f0e3`
+
+## Actual UI integration remains unverified
+
+This session has no authenticated UI-control connection: no browser-control
+connector or display environment is available. Local HTTP port 3000 identifies
+as Open WebUI; port 8000 is a model catalog proxy, and port 4500 is a WebSocket
+App Server rather than a browser UI. A read-only connection to local VNC port 5900
+timed out before receiving its protocol greeting. No UI login, thread creation or
+displayed-title check was performed, and API-created sources do not establish UI
+integration. To finish, provide access to the intended logged-in Codex UI (browser
+or remote display), run the monitor against that UI's actual App Server endpoint,
+create a new unnamed thread in the UI, submit a Japanese request, and compare the
+detected thread ID, naming/readback logs and displayed title.
+
+## Prior Unix verification at 5234bdb
 
 The opt-in [live verification script](../tools/verify_live.py) created source
 `01a1e7ce-8056-7eb0-89f9-ec9a14010f1c`. The observer detected it, deferred before
@@ -84,7 +132,7 @@ Japanese. The source name was reread as null before setting it, and a separate
 client read back the exact generated title. Both synthetic source threads are
 retained for UI inspection; helper threads were ephemeral.
 
-## Actual TCP generation and rename
+## Prior TCP verification at 5234bdb
 
 The same smoke test against `ws://127.0.0.1:4500` independently detected source
 `01a1e7cf-a316-7300-a4b0-1d81205544a8`, deferred empty history, then froze

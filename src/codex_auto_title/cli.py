@@ -25,6 +25,8 @@ def load(argv=None):
         "safety-tokens",
         "output-reserve",
         "context-retries",
+        "generation-attempts",
+        "transient-failures",
         "max-pages",
     ):
         parser.add_argument("--" + name, type=int)

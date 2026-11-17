@@ -79,3 +79,33 @@ async def test_unknown_item_is_preserved():
     t["items"].append({"type": "futureItem", "id": "future", "arbitrary": [1, 2]})
     snap = await capture(HistoryRPC([t]), "s")
     assert json.loads(snap.raw_json)[0]["data"][0]["items"][-1]["arbitrary"] == [1, 2]
+
+
+async def test_running_capture_keeps_full_validation():
+    running = turn(2)
+    running["status"] = "inProgress"
+    snap = await capture(HistoryRPC([running, turn(1)]), "s", allow_running=True)
+    assert len(snap.turns) == 2
+    assert snap.turns[-1]["status"] == "inProgress"
+    assert snap.turns[-1]["unknown"] == {"future": True}
+    with pytest.raises(Deferred, match="page bound"):
+        await capture(
+            HistoryRPC([running, turn(1)]), "s", max_pages=1, allow_running=True
+        )
+    with pytest.raises(Deferred, match="duplicate turn"):
+        await capture(HistoryRPC([running, running]), "s", allow_running=True)
+    running["itemsView"] = "summary"
+    with pytest.raises(Deferred, match="full history"):
+        await capture(HistoryRPC([running]), "s", allow_running=True)
+
+
+async def test_running_capture_rejects_repeated_cursor():
+    class RepeatedRPC:
+        async def request(self, method, params):
+            return {
+                "data": [{**turn(params["cursor"] or "first"), "status": "inProgress"}],
+                "nextCursor": "repeat",
+            }
+
+    with pytest.raises(Deferred, match="repeated pagination cursor"):
+        await capture(RepeatedRPC(), "s", allow_running=True)

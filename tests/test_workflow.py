@@ -415,3 +415,217 @@ async def test_japanese_language_guard_ignores_english_code_before_rename():
     assert m.candidates["s"].done
     assert m.candidates["s"].phase == "unsupported"
     assert not any(k == "thread/name/set" for k, _ in rpc.calls)
+
+
+@pytest.fixture
+def source_clock(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(
+        "codex_auto_title.daemon.time",
+        SimpleNamespace(monotonic=lambda: now[0], time=lambda: 0),
+    )
+    return now
+
+
+@pytest.mark.parametrize("completed", [False, True])
+async def test_one_time_delay_fresh_capture(completed, source_clock):
+    rpc = FakeRPC()
+    rpc.turns[0]["status"] = "inProgress"
+    m = monitor(rpc)
+    await m.process("s")
+    c = m.candidates["s"]
+    assert c.capture_deadline == c.retry_at == 105
+    assert c.snapshot is None and not rpc.helpers
+    history_calls = len([k for k, _ in rpc.calls if k == "thread/turns/list"])
+    rpc.turns[0]["items"].append(
+        {"id": "during", "type": "futureItem", "payload": "during wait"}
+    )
+    rpc.turns.insert(0, turn(2, "Request added during wait"))
+    if completed:
+        rpc.turns[1]["status"] = "completed"
+    source_clock[0] = 104
+    await m.process("s")
+    assert c.capture_deadline == c.retry_at == 105
+    assert len([k for k, _ in rpc.calls if k == "thread/turns/list"]) == history_calls
+
+    async def generate(snapshot, state):
+        assert "Request added during wait" in snapshot.raw_json
+        assert "during wait" in snapshot.raw_json
+        assert (snapshot.turns[0]["status"] == "completed") is completed
+        return "Generated"
+
+    m.generator = SimpleNamespace(generate=generate)
+    source_clock[0] = 105
+    await m.process("s")
+    assert c.done and rpc.name == "Generated"
+    assert c.capture_deadline == 105
+
+
+async def test_delay_and_frozen_snapshot_survive_reconnect(source_clock):
+    rpc = FakeRPC()
+    rpc.turns[0]["status"] = "inProgress"
+    m = monitor(rpc)
+    await m.process("s")
+    c = m.candidates["s"]
+
+    # Reinitializing a connection must retain candidate timing and retry state.
+    class ReconnectRPC(FakeRPC):
+        async def initialize(self):
+            self.closed.set()
+            return {}
+
+    await m.session(ReconnectRPC())
+    assert c.capture_deadline == c.retry_at == 105
+    fresh = FakeRPC(text="Fresh after reconnect")
+    fresh.turns[0]["status"] = "inProgress"
+    m.rpc = fresh
+    captured = []
+
+    async def generate(snapshot, state):
+        captured.append(snapshot)
+        raise Disconnected("generation interrupted")
+
+    m.generator = SimpleNamespace(generate=generate)
+    source_clock[0] = 105
+    await m.process("s")
+    assert c.snapshot is captured[0]
+    assert c.capture_deadline == 105
+    assert "Fresh after reconnect" in c.snapshot.raw_json
+    frozen = c.snapshot.raw_json
+    await m.session(ReconnectRPC())
+    fresh.turns.insert(0, turn(2, "Later activity"))
+    m.rpc = fresh
+
+    async def retry(snapshot, state):
+        assert snapshot is captured[0]
+        assert snapshot.raw_json == frozen
+        assert "Later activity" not in snapshot.raw_json
+        return "Generated"
+
+    m.generator = SimpleNamespace(generate=retry)
+    calls = len(fresh.calls)
+    await m.process("s")
+    assert not any(k == "thread/turns/list" for k, _ in fresh.calls[calls:])
+    assert c.done and c.capture_deadline == 105
+
+
+async def test_manual_name_during_delay_prevents_capture(source_clock):
+    rpc = FakeRPC()
+    rpc.turns[0]["status"] = "inProgress"
+    m = monitor(rpc)
+    await m.process("s")
+    rpc.name = "Manual"
+    rpc.calls.clear()
+    source_clock[0] = 105
+    await m.process("s")
+    assert m.candidates["s"].done
+    assert all(k == "thread/read" for k, _ in rpc.calls)
+
+
+async def test_failed_delayed_capture_does_not_restart_delay(source_clock):
+    rpc = FakeRPC()
+    rpc.turns[0]["status"] = "inProgress"
+    m = monitor(rpc)
+    await m.process("s")
+    source_clock[0] = 105
+    request = rpc.request
+
+    async def unavailable(method, params=None):
+        if method == "thread/turns/list":
+            raise Disconnected("history unavailable")
+        return await request(method, params)
+
+    rpc.request = unavailable
+    await m.process("s")
+    c = m.candidates["s"]
+    assert c.capture_deadline == 105 and c.retry_at == 135
+    assert c.snapshot is None and not rpc.helpers
+    rpc.request = request
+    rpc.turns[0]["itemsView"] = "summary"
+    source_clock[0] = 135
+    await m.process("s")
+    assert c.done and c.phase == "unsupported"
+    assert c.snapshot is None and not rpc.helpers
+    assert c.capture_deadline == 105
+
+
+async def test_default_polling_wakes_at_capture_deadline():
+    import time
+
+    class ScheduledRPC(FakeRPC):
+        async def initialize(self):
+            return {}
+
+        async def request(self, method, params=None):
+            if method == "thread/name/set":
+                self.closed.set()
+            return await super().request(method, params)
+
+    rpc = ScheduledRPC()
+    rpc.turns[0]["status"] = "inProgress"
+    m = monitor(rpc)
+    m.baselined = True
+    captured_at = []
+    request = rpc.request
+
+    async def record(method, params=None):
+        if method == "thread/turns/list":
+            captured_at.append(time.monotonic())
+        return await request(method, params)
+
+    rpc.request = record
+    assert m.s.poll_seconds == 10
+    await asyncio.wait_for(m.session(rpc), 8)
+    assert len(captured_at) == 2
+    deadline = m.candidates["s"].capture_deadline
+    assert deadline is not None
+    assert 0 <= captured_at[1] - deadline < 1
+    assert rpc.name == "Build the interface"
+
+
+@pytest.mark.parametrize("kind", ["userMessage", "futureImageInput"])
+async def test_empty_delayed_capture_retries_without_another_delay(kind, source_clock):
+    rpc = FakeRPC(text="")
+    rpc.turns[0]["status"] = "inProgress"
+    rpc.turns[0]["items"][0]["type"] = kind
+    m = monitor(rpc)
+    await m.process("s")
+    source_clock[0] = 105
+    await m.process("s")
+    c = m.candidates["s"]
+    assert c.phase == "waiting" and c.snapshot is None
+    assert c.capture_deadline == 105 and c.retry_at == 135
+    assert not rpc.helpers and not c.failures
+    rpc.turns.insert(0, turn(2, "Meaningful input"))
+    source_clock[0] = 135
+    await m.process("s")
+    assert c.done and c.capture_deadline == 105
+
+
+async def test_disconnect_cancellation_does_not_postpone_capture(source_clock):
+    rpc = FakeRPC()
+    rpc.turns[0]["status"] = "inProgress"
+    m = monitor(rpc)
+    await m.process("s")
+    c = m.candidates["s"]
+    entered = asyncio.Event()
+    request = rpc.request
+
+    async def blocked(method, params=None):
+        if method == "thread/turns/list":
+            entered.set()
+            await asyncio.Future()
+        return await request(method, params)
+
+    rpc.request = blocked
+    source_clock[0] = 105
+    job = asyncio.create_task(m.process("s"))
+    await entered.wait()
+    job.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await job
+    assert c.capture_deadline == c.retry_at == 105
+    assert c.snapshot is None
+    rpc.request = request
+    await m.process("s")
+    assert c.done

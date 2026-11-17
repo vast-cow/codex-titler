@@ -14,7 +14,11 @@ class Deferred(Exception):
 
 
 class Waiting(Deferred):
-    """No initial text or terminal source turn yet; no model budget is spent."""
+    """No initial textual user input yet; no model budget is spent."""
+
+
+class SourceRunning(Waiting):
+    """Start the candidate's one-time source capture delay."""
 
 
 class Page(BaseModel):
@@ -87,7 +91,7 @@ def user_messages(items):
     ]
 
 
-async def capture(rpc, thread_id, max_pages=10000):
+async def capture(rpc, thread_id, max_pages=10000, *, allow_running=False):
     started, result, ids = time.time(), [], set()
     async for page in pages(
         rpc,
@@ -101,8 +105,10 @@ async def capture(rpc, thread_id, max_pages=10000):
             ids.add(turn["id"])
             if turn.get("itemsView", "full") != "full" or "items" not in turn:
                 raise Deferred("server did not expose full history items")
-            if turn["status"] == "inProgress":
-                raise Waiting("source turn still running; wait for completion")
+            if turn["status"] == "inProgress" and not allow_running:
+                raise SourceRunning(
+                    "source turn still running; capture after five seconds"
+                )
         result.append(page)
     return await asyncio.to_thread(freeze, thread_id, started, result)
 

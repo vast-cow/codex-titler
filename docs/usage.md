@@ -41,7 +41,18 @@ Configuration is validated with Pydantic; unknown keys and invalid values fail e
 
 WebSocket frames are capped at `max_message_bytes` (64 MiB initially). Oversized responses disconnect and defer the incomplete job. Increase the cap if full history pages require it; an individual server item can exceed the cap even with small page sizes. Requests have a deadline covering send plus response; standalone initialization sends, handshakes and generation also have finite timeouts. Ctrl-C cancels workers, attempts helper interruption/unsubscription and closes the connection.
 
-Waiting/transient jobs log their phase and retry no faster than every 30 seconds.
+When an eligible unnamed thread first has a running source turn, collection waits
+once for five seconds, then reads fresh full history including available items
+from running turns. Completion during the wait does not shorten it. The deadline
+is retained across retries and reconnects within the daemon process. Once a valid
+snapshot contains meaningful user text, it is frozen for generation and context
+retries; later source activity is excluded.
+
+The five-second deadline wakes the scheduler independently of `poll_seconds = 10`
+and the generic retry delay; connection, worker and RPC availability can affect
+when collection actually starts. Other waiting/transient jobs log their phase
+and retry no faster than every 30 seconds. Empty/nontext input and retrieval
+failures follow their existing deferral policy without restarting the source delay.
 Terminal unsupported/exhausted candidates do not retry. `generation_attempts` caps
 lifetime probes and title turns separately; `context_retries` and
 `transient_failures` never reset on polling or reconnect. The latter also caps

@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 
 from .generation import Generator
-from .history import Deferred, Snapshot, Waiting, capture, pages
+from .history import Deferred, Snapshot, SourceRunning, Waiting, capture, pages
 from .lifecycle import AttemptState, Exhausted
 from .rpc import RPC, RpcError, connection
 
@@ -18,6 +18,7 @@ class Candidate:
     snapshot: Snapshot | None = None
     title: str | None = None
     done: bool = False
+    capture_deadline: float | None = None
     retry_at: float = 0
     attempts: AttemptState = field(default_factory=AttemptState)
     failures: int = 0
@@ -44,8 +45,10 @@ class Monitor:
         self.baselined = False
         self.rpc = None
         self.generator = None
+        self.wake = asyncio.Event()
 
     def event(self, method, params):
+        self.wake.set()
         if method == "thread/started":
             t = params["thread"]
             tid = t["id"]
@@ -90,6 +93,7 @@ class Monitor:
         candidate = self.candidates[tid]
         if candidate.done:
             return
+        cancelled = False
         try:
             t = await self.metadata(tid)
             if t.get("ephemeral") is not False or t["name"] is not None:
@@ -104,14 +108,23 @@ class Monitor:
             if candidate.title is None:
                 candidate.attempts.check(self.s)
                 if candidate.snapshot is None:
-                    snap = await capture(self.rpc, tid, self.s.max_pages)
+                    if (
+                        candidate.capture_deadline is not None
+                        and time.monotonic() < candidate.capture_deadline
+                    ):
+                        raise SourceRunning("waiting for five-second capture deadline")
+                    candidate.phase = "capturing"
+                    snap = await capture(
+                        self.rpc,
+                        tid,
+                        self.s.max_pages,
+                        allow_running=candidate.capture_deadline is not None,
+                    )
                     ready = await asyncio.to_thread(
                         lambda: bool(snap.boundaries) and any(snap.user_messages)
                     )
                     if not ready:
-                        raise Waiting(
-                            "waiting for meaningful user input and a terminal turn"
-                        )
+                        raise Waiting("waiting for meaningful user input")
                     candidate.snapshot = snap
                     candidate.snapshot_sha256 = snap.sha256
                     log.info("snapshot thread=%s hash=%s", tid, snap.sha256)
@@ -149,9 +162,14 @@ class Monitor:
                 confirmed["name"] == candidate.title,
             )
         except asyncio.CancelledError:
+            cancelled = True
             if candidate.done:
                 candidate.snapshot = None
             raise
+        except SourceRunning as exc:
+            if candidate.capture_deadline is None:
+                candidate.capture_deadline = time.monotonic() + 5
+            candidate.phase, candidate.reason = "source_delay", str(exc)[:1000]
         except Waiting as exc:
             candidate.phase, candidate.reason = "waiting", str(exc)[:1000]
         except Exhausted as exc:
@@ -192,7 +210,12 @@ class Monitor:
                     candidate.reason,
                 )
             else:
-                candidate.retry_at = time.monotonic() + max(30, self.s.poll_seconds)
+                if not cancelled:
+                    candidate.retry_at = (
+                        candidate.capture_deadline
+                        if candidate.phase == "source_delay"
+                        else time.monotonic() + max(30, self.s.poll_seconds)
+                    )
                 log.warning(
                     "deferred thread=%s phase=%s: %s",
                     tid,
@@ -217,6 +240,7 @@ class Monitor:
                     )
                 self.baselined = True
             while not rpc.closed.is_set():
+                self.wake.clear()
                 for tid, job in tuple(self.jobs.items()):
                     if job.done():
                         # Retrieve unexpected task failures, including cancellation.
@@ -232,10 +256,30 @@ class Monitor:
                         and candidate.retry_at <= time.monotonic()
                     ):
                         self.jobs[tid] = asyncio.create_task(self.process(tid))
+                        self.jobs[tid].add_done_callback(lambda _: self.wake.set())
+                # Free workers promptly and wake for candidate deadlines, independently
+                # of the ordinary polling interval. Never overlap jobs for a thread.
+                timeout = self.s.poll_seconds
+                if len(self.jobs) < self.s.workers:
+                    due = [
+                        c.retry_at
+                        for tid, c in self.candidates.items()
+                        if not c.done and tid not in self.jobs
+                    ]
+                    if due:
+                        timeout = min(timeout, max(0, min(due) - time.monotonic()))
+                waits = [
+                    asyncio.create_task(rpc.closed.wait()),
+                    asyncio.create_task(self.wake.wait()),
+                ]
                 try:
-                    await asyncio.wait_for(rpc.closed.wait(), self.s.poll_seconds)
-                except TimeoutError:
-                    pass
+                    await asyncio.wait(
+                        waits, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+                    )
+                finally:
+                    for task in waits:
+                        task.cancel()
+                    await asyncio.gather(*waits, return_exceptions=True)
         finally:
             rpc.listeners.discard(self.event)
             for task in self.jobs.values():

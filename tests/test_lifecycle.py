@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from types import SimpleNamespace
 
 import pytest
 from test_history import HistoryRPC, turn
@@ -68,7 +69,7 @@ async def test_probe_failures_bounded_across_cycles():
     assert c.snapshot is None
 
 
-async def test_empty_and_running_polling_spends_no_attempts():
+async def test_empty_and_running_polling_spends_no_attempts(monkeypatch):
     rpc = FakeRPC(text="")
     m = monitor(rpc)
     for _ in range(5):
@@ -78,9 +79,15 @@ async def test_empty_and_running_polling_spends_no_attempts():
     for _ in range(5):
         await m.process("s")
     c = m.candidates["s"]
-    assert not c.done and c.phase == "waiting"
+    assert not c.done and c.phase == "source_delay"
     assert c.failures == c.attempts.probes == c.attempts.generations == 0
     rpc.turns[0]["status"] = "completed"
+    await m.process("s")
+    assert not c.done
+    monkeypatch.setattr(
+        "codex_auto_title.daemon.time",
+        SimpleNamespace(monotonic=lambda: c.capture_deadline),
+    )
     await m.process("s")
     assert c.done and c.phase == "named"
 

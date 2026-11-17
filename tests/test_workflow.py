@@ -16,6 +16,7 @@ class FakeRPC(HistoryRPC):
         super().__init__([turn(1, text)])
         self.listeners = set()
         self.closed = asyncio.Event()
+        self.probe_metadata = {}
         self.name, self.window, self.available = name, window, available
         self.helpers = 0
         self.ambiguous = False

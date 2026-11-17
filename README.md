@@ -14,7 +14,7 @@ Use `--backfill-once` to title eligible existing unarchived threads and exit; co
 
 The Unix listener must speak WebSocket, including HTTP Upgrade. It is not a JSON-lines socket. The utility never starts another server. `wss://` uses certificate verification.
 
-Input sizing uses a verified `tiktoken` mapping when available; otherwise the default policy estimates tokens as UTF-8 bytes × 1.25. This is an approximation, not Luna's exact tokenizer or a fit guarantee. Every job must separately discover the effective context limit with a small Luna/low runtime probe before submitting history; no context limit is hard-coded. Additional margins reserve instructions, server context, output and reasoning. Configure `estimation_policy = "exact_only"` to require a verified mapping.
+Input sizing uses a verified `tiktoken` mapping when available; otherwise the default policy estimates tokens as UTF-8 bytes × 1.25. This is an approximation, not Luna's exact tokenizer or a fit guarantee. A small Luna/low runtime probe discovers the effective context limit before submitting history; successful metadata is reused across jobs with equivalent effective settings on the same live connection. No context limit is hard-coded. Additional margins reserve instructions, server context, output and reasoning. Configure `estimation_policy = "exact_only"` to require a verified mapping.
 
 Real-server verification and remaining limitations are recorded in [compatibility and validation](docs/compatibility.md).
 

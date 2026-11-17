@@ -266,6 +266,8 @@ async def test_partial_generation_budget_and_smaller_representation_survive_reco
     assert c.attempts.generations == 2 and c.attempts.context_retries == 1
     original = c.snapshot.raw_json
     c.snapshot.items[0]["content"][0]["text"] = "not mutable"
+    rpc = FakeRPC()
+    m.rpc = rpc
     m.generator = Generator(rpc, m.s)
     m.generator.attempt = attempt
     await m.process("s")

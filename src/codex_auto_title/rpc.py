@@ -79,6 +79,8 @@ class RPC:
         self.listeners = set()
         self.reader = None
         self.closed = asyncio.Event()
+        # Successful metadata and in-flight probes belong to this connection only.
+        self.probe_metadata = {}
 
     async def __aenter__(self):
         self.reader = asyncio.create_task(self.receive())

@@ -98,7 +98,6 @@ class Generator:
         self.rpc, self.s = rpc, settings
         self.helpers = set()
         self.last_discovery = None
-        # No cross-connection cache: provider/config/server changes force a fresh probe.
 
     def start_params(self):
         return {
@@ -300,6 +299,44 @@ class Generator:
                     )
             self.rpc.listeners.discard(event)
 
+    async def discover(self, schema, overrides, state):
+        # Model, effort, instructions and all other helper settings are fixed.
+        # Only provider, schema maxLength and resolved MCP overrides vary by job.
+        key = (
+            self.s.provider,
+            self.s.max_title_length,
+            tuple(sorted(overrides.items())),
+        )
+        cache = self.rpc.probe_metadata
+        future = cache.get(key)
+        self.last_discovery = None
+        if future is None:
+            future = asyncio.get_running_loop().create_future()
+            cache[key] = future
+            state.probes += 1
+            try:
+                window, overhead = await self.attempt(
+                    'Return {"title":"Probe"}.',
+                    probe=True,
+                    schema=schema,
+                    overrides=overrides,
+                )
+                future.set_result((window, overhead, self.last_discovery))
+            except BaseException as exc:
+                del cache[key]
+                future.set_exception(exc)
+                # The initiating job also receives the error directly; consume it
+                # here in case no other workers are waiting on the future.
+                future.exception()
+                raise
+        elif not future.done():
+            # Shared failures still spend each participating candidate's budget.
+            state.probes += 1
+        # Cancelling a waiting job must not cancel another job's probe.
+        window, overhead, discovery = await asyncio.shield(future)
+        self.last_discovery = discovery
+        return window, overhead
+
     async def generate(self, snapshot, state=None):
         state = state if state is not None else AttemptState()
         state.check(self.s)
@@ -309,13 +346,7 @@ class Generator:
         overrides = await self.configure_capabilities()
         schema = Title.model_json_schema()
         schema["properties"]["title"]["maxLength"] = self.s.max_title_length
-        # Probe with identical effective configuration and output schema. No persistent cache:
-        # every job discovers again, including after provider/auth/config changes.
-        state.probes += 1
-        self.last_discovery = None
-        window, overhead = await self.attempt(
-            'Return {"title":"Probe"}.', probe=True, schema=schema, overrides=overrides
-        )
+        window, overhead = await self.discover(schema, overrides, state)
         log.info(
             "input sizing method=%s verified_mapping=%s context_fraction=%s",
             count.method,

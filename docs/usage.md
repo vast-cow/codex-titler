@@ -9,6 +9,7 @@ Connect to the same listening App Server process used by the UI whose threads sh
 endpoint = "unix:///absolute/path/to/app-server.sock"
 unix_uri = "ws://localhost/"
 provider = "openai"
+ephemeral_project_path = "/tmp"
 request_timeout = 30
 generation_timeout = 180
 workers = 2
@@ -34,6 +35,23 @@ codex-auto-title --endpoint wss://codex.example.com --token-env CODEX_SERVER_TOK
 ```
 
 Configuration is validated with Pydantic; unknown keys and invalid values fail early. CLI values override TOML values, which override defaults. All settings except `endpoint` have defaults. Use `--help` for CLI switches. There is deliberately no model or effort override.
+
+`ephemeral_project_path` sets the project directory for every ephemeral helper,
+including context-limit probes and title-generation attempts in both continuous
+monitoring and one-time backfill mode. It defaults to the literal `/tmp`, even
+without a configuration file. The same directory is used to read the helper's
+configuration and discover MCP servers to disable; probe metadata is cached
+separately for each project path. Source threads are unaffected.
+
+The path refers to the App Server host, including when the server is remote.
+It is passed unchanged to the server without checking local directory existence.
+Set it in the TOML file to use a custom directory on that host:
+
+```toml
+[titler]
+endpoint = "wss://codex.example.com"
+ephemeral_project_path = "/srv/codex/title-helpers"
+```
 
 `token_env` (CLI `--token-env`) names an environment variable holding a bearer token. It is sent in the HTTP handshake on either transport. Tokens are never loaded from repository `.env` files or printed by this application. Only use `--verbose` with care: third-party WebSocket debug logs can include handshake headers and transcript data.
 

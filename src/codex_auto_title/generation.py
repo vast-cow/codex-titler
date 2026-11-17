@@ -105,6 +105,7 @@ class Generator:
             "modelProvider": self.s.provider,
             "allowProviderModelFallback": False,
             "ephemeral": True,
+            "cwd": self.s.ephemeral_project_path,
             "approvalPolicy": "never",
             "sandbox": "read-only",
             "environments": [],
@@ -125,7 +126,10 @@ class Generator:
         }
 
     async def configure_capabilities(self):
-        response = await self.rpc.request("config/read", {"includeLayers": False})
+        response = await self.rpc.request(
+            "config/read",
+            {"includeLayers": False, "cwd": self.s.ephemeral_project_path},
+        )
         config = response["config"]
         # Empty tables merge with inherited configuration; disable servers individually.
         overrides = {
@@ -301,9 +305,10 @@ class Generator:
 
     async def discover(self, schema, overrides, state):
         # Model, effort, instructions and all other helper settings are fixed.
-        # Only provider, schema maxLength and resolved MCP overrides vary by job.
+        # Provider, project path, schema maxLength and resolved MCP overrides vary.
         key = (
             self.s.provider,
+            self.s.ephemeral_project_path,
             self.s.max_title_length,
             tuple(sorted(overrides.items())),
         )

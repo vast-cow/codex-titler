@@ -630,3 +630,29 @@ async def test_disconnect_cancellation_does_not_postpone_capture(source_clock):
     rpc.request = request
     await m.process("s")
     assert c.done
+
+
+@pytest.mark.parametrize("mode", ["watch", "backfill"])
+@pytest.mark.parametrize("project_path", [None, "/remote/server/title-helpers"])
+async def test_helper_project_path_propagation(mode, project_path):
+    from codex_auto_title.backfill import Backfill
+
+    settings = Settings(
+        endpoint="ws://localhost",
+        **({"ephemeral_project_path": project_path} if project_path else {}),
+    )
+    rpc = FakeRPC()
+    runner = (Monitor if mode == "watch" else Backfill)(settings)
+    runner.rpc = rpc
+    runner.generator = Generator(rpc, settings)
+    runner.candidates["s"] = Candidate()
+    await runner.process("s")
+    assert runner.candidates["s"].phase == "named"
+    expected = project_path or "/tmp"
+    assert [p for k, p in rpc.calls if k == "config/read"] == [
+        {"includeLayers": False, "cwd": expected}
+    ]
+    starts = [p for k, p in rpc.calls if k == "thread/start"]
+    assert len(starts) == 2  # Context-limit probe and title-generation attempt.
+    assert all(p["cwd"] == expected and p["ephemeral"] is True for p in starts)
+    assert all(p["config"]["mcp_servers.test.enabled"] is False for p in starts)

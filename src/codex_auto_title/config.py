@@ -14,6 +14,7 @@ class Settings(BaseModel):
     unix_uri: str = "ws://localhost/"
     token_env: str | None = None
     provider: str = "openai"
+    ephemeral_project_path: str = Field(default="/tmp", min_length=1)
     request_timeout: float = Field(default=30, gt=0)
     generation_timeout: float = Field(default=180, gt=0)
     max_message_bytes: int = Field(default=64 * 1024 * 1024, gt=0)

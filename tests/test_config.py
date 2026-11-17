@@ -73,3 +73,20 @@ def test_estimation_cli():
     assert settings.estimation_policy == "exact_only"
     assert settings.estimate_multiplier == 2
     assert settings.context_fraction == 0.5
+
+
+def test_ephemeral_project_path_defaults_without_config():
+    assert Settings(endpoint="ws://localhost").ephemeral_project_path == "/tmp"
+    settings, _ = load(["--endpoint", "ws://localhost"])
+    assert settings.ephemeral_project_path == "/tmp"
+
+
+@pytest.mark.parametrize("project_path", [None, "/remote/server/title-helpers"])
+def test_ephemeral_project_path_from_toml(tmp_path, project_path):
+    path = tmp_path / "titler.toml"
+    contents = '[titler]\nendpoint = "ws://localhost"\n'
+    if project_path is not None:
+        contents += f'ephemeral_project_path = "{project_path}"\n'
+    path.write_text(contents)
+    settings, _ = load(["--config", str(path)])
+    assert settings.ephemeral_project_path == (project_path or "/tmp")

@@ -9,6 +9,7 @@ from pathlib import Path
 FIELDS = {
     "ThreadStartParams": [
         "ephemeral",
+        "cwd",
         "model",
         "modelProvider",
         "allowProviderModelFallback",
@@ -30,7 +31,7 @@ FIELDS = {
     "ThreadSetNameParams": ["threadId", "name"],
     "ThreadUnsubscribeParams": ["threadId"],
     "ModelListParams": ["modelProvider", "includeHidden", "cursor"],
-    "ConfigReadParams": ["includeLayers"],
+    "ConfigReadParams": ["includeLayers", "cwd"],
 }
 
 

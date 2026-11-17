@@ -182,3 +182,18 @@ async def test_cancelled_probes_and_waiters_leave_no_stuck_entry(cancel_owner):
     snapshot = await capture(rpc, "s")
     await Generator(rpc, Settings(endpoint="ws://localhost")).generate(snapshot)
     assert rpc.probes == (2 if cancel_owner else 1)
+
+
+async def test_probe_cache_separates_project_paths_and_reuses_matching_paths():
+    rpc = ProbeRPC()
+    snapshot = await capture(rpc, "s")
+    for path, expected_probes in [
+        ("/tmp", 1),
+        ("/remote/title-helpers", 2),
+        ("/remote/title-helpers", 2),
+        ("/tmp", 2),
+    ]:
+        settings = Settings(endpoint="ws://localhost", ephemeral_project_path=path)
+        await Generator(rpc, settings).generate(snapshot)
+        assert rpc.probes == expected_probes
+    assert len(rpc.probe_metadata) == 2

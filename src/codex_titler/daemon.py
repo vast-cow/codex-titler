@@ -49,9 +49,29 @@ class Monitor:
             self.schedule(params["threadId"])
 
     async def scan(self):
+        started = time.monotonic()
+        scanned = 0
+        eligible = 0
+
+        log.info(
+            "scan_started",
+            reconcile_interval=self.s.reconcile_interval,
+        )
+
         async for thread in self.api.threads():
+            scanned += 1
             if self.eligible(thread):
+                eligible += 1
                 self.schedule(thread.id)
+
+        log.info(
+            "scan_finished",
+            scanned=scanned,
+            eligible=eligible,
+            pending=len(self.pending),
+            active=len(self.active),
+            duration_seconds=round(time.monotonic() - started, 3),
+        )
 
     async def worker(self):
         while True:

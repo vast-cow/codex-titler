@@ -17,6 +17,9 @@ max_title_length = 80
 safety_tokens = 8192
 output_reserve = 4096
 context_retries = 2
+estimation_policy = "utf8_bytes" # or "exact_only"
+estimate_multiplier = 1.25
+context_fraction = 0.8
 poll_seconds = 10
 reconnect_max = 30
 max_pages = 10000
@@ -36,4 +39,12 @@ Configuration is validated with Pydantic; unknown keys and invalid values fail e
 
 WebSocket frames are capped at `max_message_bytes` (64 MiB initially). Oversized responses disconnect and defer the incomplete job. Increase the cap if full history pages require it; an individual server item can exceed the cap even with small page sizes. Requests, handshakes and generation have finite timeouts. Ctrl-C cancels workers, attempts helper interruption/unsubscription and closes the connection.
 
-Deferred jobs log their reason and retry no faster than every 30 seconds. There is no automatic tokenizer download, encoding alias, model fallback or hard-coded context limit. With the currently pinned tokenizer, generation is deferred. Updating dependency pins requires re-verifying an explicit model mapping, locking dependencies and running tests.
+Deferred jobs log their reason and retry no faster than every 30 seconds. There is no encoding alias, model fallback or hard-coded context limit. The default approximation permits generation without a verified tokenizer mapping; missing runtime context still defers. `--estimation-policy`, `--estimate-multiplier` and `--context-fraction` override the TOML values. See the [budget policy](behavior.md#generation) for assumptions and reserves.
+
+To run the opt-in live smoke test (creates and retains one named synthetic source thread, plus ephemeral helpers):
+
+```sh
+uv run python tools/verify_live.py --endpoint unix:///absolute/path/to/app-server.sock
+```
+
+Use the same endpoint as the intended UI; the script verifies broadcast detection across two real client connections, Japanese title script, frozen snapshot and name readback. Its Japanese-script check is a sanity check, not a universal language classifier. It does not prove notifications from an unrelated server or UI connection.

@@ -15,6 +15,7 @@ def load(argv=None):
         description="Title new threads on an existing Codex App Server"
     )
     parser.add_argument("--config", type=Path, help="TOML file with a [titler] table")
+    parser.add_argument("--estimation-policy", choices=["utf8_bytes", "exact_only"])
     for name in ("endpoint", "unix-uri", "token-env", "provider"):
         parser.add_argument("--" + name)
     for name in (
@@ -28,6 +29,8 @@ def load(argv=None):
     ):
         parser.add_argument("--" + name, type=int)
     for name in (
+        "estimate-multiplier",
+        "context-fraction",
         "request-timeout",
         "generation-timeout",
         "poll-seconds",

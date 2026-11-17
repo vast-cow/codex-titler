@@ -1,6 +1,10 @@
 import asyncio
 import logging
+import math
+import re
+from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 
 import tiktoken
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -24,21 +28,75 @@ class Title(BaseModel):
         return value
 
 
-def tokenizer():
+@dataclass(frozen=True)
+class TokenCounter:
+    count: Callable[[str], int]
+    method: str
+    verified: bool
+
+    def __call__(self, text):
+        return self.count(text)
+
+
+def tokenizer(settings):
     try:
         encoding = tiktoken.encoding_for_model(MODEL)
-    except (KeyError, ValueError) as exc:
+    except (KeyError, ValueError):
+        # model/list in Codex 0.169.0 exposes no tokenizer identity. Do not infer
+        # equivalence from model family names or alias an unrelated encoding.
+        if settings.estimation_policy == "exact_only":
+            raise Deferred(
+                f"no verified tokenizer mapping for {MODEL}; enable "
+                "estimation_policy=utf8_bytes to permit approximate input sizing"
+            )
+        return TokenCounter(
+            lambda text: math.ceil(
+                len(text.encode("utf-8")) * settings.estimate_multiplier
+            ),
+            f"approximate utf8_bytes x {settings.estimate_multiplier}",
+            False,
+        )
+    return TokenCounter(
+        lambda text: len(encoding.encode(text, disallowed_special=())),
+        f"tiktoken {tiktoken.__version__} mapping: {encoding.name}",
+        True,
+    )
+
+
+def validate_language(snapshot, title):
+    # A narrow Japanese sanity check supplements model-based language inference.
+    # Never treat fenced code, inline code, quoted lines or common logs as prose.
+    prose = "\n".join(snapshot.user_messages)
+    prose = re.sub(r"```.*?(?:```|$)", "", prose, flags=re.S)
+    prose = re.sub(r"`[^`]*`", "", prose)
+    prose = "\n".join(
+        line
+        for line in prose.splitlines()
+        if not re.match(r"\s*(?:>|(?:INFO|DEBUG|WARN|ERROR)\b)", line)
+    )
+    kana = len(re.findall(r"[\u3040-\u30ff]", prose))
+    latin = len(re.findall(r"[A-Za-z]", prose))
+    if (
+        kana >= 8
+        and kana > latin
+        and not re.search(r"[\u3040-\u30ff\u3400-\u9fff]", title)
+    ):
         raise Deferred(
-            f"tiktoken {tiktoken.__version__} has no verified mapping for {MODEL}; "
-            "title generation deferred, no fallback tokenizer"
-        ) from exc
-    return lambda text: len(encoding.encode(text, disallowed_special=()))
+            "title language sanity check failed: Japanese prose produced a non-Japanese title"
+        )
+
+
+class GenerationFailure(RpcError):
+    def __init__(self, error):
+        super().__init__(encode(error))
+        self.context_size = error.get("codexErrorInfo") == "contextWindowExceeded"
 
 
 class Generator:
     def __init__(self, rpc, settings):
         self.rpc, self.s = rpc, settings
         self.helpers = set()
+        self.last_discovery = None
         # No cross-connection cache: provider/config/server changes force a fresh probe.
 
     def start_params(self):
@@ -156,7 +214,7 @@ class Generator:
                         await asyncio.wait_for(signal.wait(), 1)
             turn = completed[(helper_id, turn_id)]
             if turn["status"] != "completed":
-                raise RpcError(encode(turn.get("error") or {"status": turn["status"]}))
+                raise GenerationFailure(turn.get("error") or {"status": turn["status"]})
             if probe:
                 u = usage.get(helper_id, {})
                 window = u.get("modelContextWindow")
@@ -168,8 +226,21 @@ class Generator:
                     or total <= 0
                 ):
                     raise Deferred(
-                        "probe lacks valid runtime modelContextWindow/inputTokens"
+                        "probe lacks valid runtime modelContextWindow/inputTokens; "
+                        "check server/provider token-usage support for gpt-6-luna/low; "
+                        "no source-thread or fixed context fallback is permitted"
                     )
+                self.last_discovery = {
+                    "model": MODEL,
+                    "provider": self.s.provider,
+                    "effort": "low",
+                    "helper_thread": helper_id,
+                    "turn": turn_id,
+                    "source": "thread/tokenUsage/updated",
+                    "context_limit": window,
+                    "probe_input_tokens": total,
+                }
+                log.info("runtime context discovery %s", self.last_discovery)
                 return window, total
             answers = [
                 i["text"]
@@ -204,7 +275,6 @@ class Generator:
             self.rpc.listeners.discard(event)
 
     async def generate(self, snapshot):
-        count = tokenizer()
         await self.verify_model()
         overrides = await self.configure_capabilities()
         schema = Title.model_json_schema()
@@ -214,8 +284,15 @@ class Generator:
         window, overhead = await self.attempt(
             'Return {"title":"Probe"}.', probe=True, schema=schema, overrides=overrides
         )
+        count = tokenizer(self.s)
+        log.info(
+            "input sizing method=%s verified_mapping=%s context_fraction=%s",
+            count.method,
+            count.verified,
+            self.s.context_fraction,
+        )
         budget = (
-            window
+            math.floor(window * self.s.context_fraction)
             - overhead
             - self.s.safety_tokens
             - self.s.output_reserve
@@ -226,12 +303,11 @@ class Generator:
         for attempt in range(self.s.context_retries + 1):
             prompt = representation(snapshot, count, budget)
             try:
-                return await self.attempt(prompt, schema=schema, overrides=overrides)
+                title = await self.attempt(prompt, schema=schema, overrides=overrides)
+                validate_language(snapshot, title)
+                return title
             except RpcError as exc:
-                if (
-                    "contextWindowExceeded" not in str(exc)
-                    or attempt == self.s.context_retries
-                ):
+                if not exc.context_size or attempt == self.s.context_retries:
                     raise
-                budget //= 2
+                budget = min(budget // 2, count(prompt) // 2)
         raise Deferred("context retries exhausted")

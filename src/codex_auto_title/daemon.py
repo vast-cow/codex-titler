@@ -48,8 +48,13 @@ class Monitor:
                 self.candidates[tid] = Candidate()
         elif method == "thread/name/updated" and params.get("threadName") is not None:
             tid = params["threadId"]
-            if tid in self.candidates:
-                self.candidates[tid].done = True
+            candidate = self.candidates.get(tid)
+            if candidate and candidate.title == params["threadName"]:
+                # Our own broadcast can precede the name-set acknowledgement.
+                # Keep the worker alive to read back the result.
+                return
+            if candidate:
+                candidate.done = True
             job = self.jobs.get(tid)
             if job:
                 job.cancel()
@@ -98,8 +103,17 @@ class Monitor:
             await self.rpc.request(
                 "thread/name/set", {"threadId": tid, "name": candidate.title}
             )
+            confirmed = await self.metadata(tid)
+            if confirmed["name"] is None:
+                raise Deferred(
+                    "name-set acknowledged but readback is null; retain rename intent"
+                )
             candidate.done = True
-            log.info("named thread=%s", tid)
+            log.info(
+                "name readback thread=%s matches=%s",
+                tid,
+                confirmed["name"] == candidate.title,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:

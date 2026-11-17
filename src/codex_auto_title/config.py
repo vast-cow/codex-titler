@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 from urllib.parse import unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -19,6 +20,9 @@ class Settings(BaseModel):
     max_title_length: int = Field(default=80, ge=1, le=500)
     safety_tokens: int = Field(default=8192, ge=0)
     output_reserve: int = Field(default=4096, ge=1)
+    estimation_policy: Literal["utf8_bytes", "exact_only"] = "utf8_bytes"
+    estimate_multiplier: float = Field(default=1.25, ge=1, le=10)
+    context_fraction: float = Field(default=0.8, gt=0, le=1)
     context_retries: int = Field(default=2, ge=0, le=5)
     reconnect_max: float = Field(default=30, ge=1)
     poll_seconds: float = Field(default=10, gt=0)

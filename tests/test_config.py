@@ -41,3 +41,35 @@ def test_tls_endpoint_and_separate_unix_uri():
     s = Settings(endpoint="unix:///tmp/my%20socket", unix_uri="ws://localhost/rpc")
     assert s.socket_path == "/tmp/my socket"
     assert s.unix_uri == "ws://localhost/rpc"
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"estimation_policy": "guess"},
+        {"estimate_multiplier": 0.9},
+        {"context_fraction": 0},
+        {"context_fraction": 1.1},
+    ],
+)
+def test_invalid_estimation_settings(values):
+    with pytest.raises(ValidationError):
+        Settings(endpoint="ws://localhost", **values)
+
+
+def test_estimation_cli():
+    settings, _ = load(
+        [
+            "--endpoint",
+            "ws://localhost",
+            "--estimation-policy",
+            "exact_only",
+            "--estimate-multiplier",
+            "2",
+            "--context-fraction",
+            "0.5",
+        ]
+    )
+    assert settings.estimation_policy == "exact_only"
+    assert settings.estimate_multiplier == 2
+    assert settings.context_fraction == 0.5

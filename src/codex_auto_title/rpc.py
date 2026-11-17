@@ -14,7 +14,13 @@ log = logging.getLogger(__name__)
 
 
 class RpcError(Exception):
-    pass
+    def __init__(self, error):
+        super().__init__(json.dumps(error) if isinstance(error, dict) else error)
+        data = error.get("data") if isinstance(error, dict) else None
+        self.context_size = (
+            isinstance(data, dict)
+            and data.get("codexErrorInfo") == "contextWindowExceeded"
+        )
 
 
 class Disconnected(RpcError):
@@ -138,7 +144,7 @@ class RPC:
                     future = self.pending[envelope.id]
                     if not future.done():
                         if "error" in message:
-                            future.set_exception(RpcError(json.dumps(message["error"])))
+                            future.set_exception(RpcError(message["error"]))
                         else:
                             future.set_result(message["result"])
         except asyncio.CancelledError:

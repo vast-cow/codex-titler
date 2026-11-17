@@ -6,7 +6,7 @@ from test_history import HistoryRPC, turn
 
 from codex_auto_title.config import MODEL, Settings
 from codex_auto_title.daemon import Candidate, Monitor
-from codex_auto_title.generation import Generator, Title, tokenizer
+from codex_auto_title.generation import GenerationFailure, Generator, Title, tokenizer
 from codex_auto_title.history import Deferred
 from codex_auto_title.rpc import Disconnected
 
@@ -133,7 +133,6 @@ def test_candidate_policy():
 
 
 async def test_generation_before_ack_and_probe(monkeypatch):
-    monkeypatch.setattr("codex_auto_title.generation.tokenizer", lambda: len)
     rpc = FakeRPC()
     m = monitor(rpc)
     rpc.listeners.add(m.event)
@@ -166,8 +165,11 @@ def test_unsupported_tokenizer(monkeypatch):
         raise KeyError("unknown")
 
     monkeypatch.setattr("tiktoken.encoding_for_model", unsupported)
-    with pytest.raises(Deferred, match="no verified mapping"):
-        tokenizer()
+    counter = tokenizer(Settings(endpoint="ws://localhost"))
+    assert not counter.verified
+    assert counter("日本語") == 12
+    with pytest.raises(Deferred, match="no verified tokenizer"):
+        tokenizer(Settings(endpoint="ws://localhost", estimation_policy="exact_only"))
 
 
 async def test_manual_rename_and_snapshot_stability():
@@ -230,10 +232,8 @@ async def test_failed_history_never_generates():
 
 async def test_context_retry_uses_same_snapshot_and_fresh_helper(monkeypatch):
     from codex_auto_title.history import capture
-    from codex_auto_title.rpc import RpcError
 
-    monkeypatch.setattr("codex_auto_title.generation.tokenizer", lambda: len)
-    rpc = FakeRPC()
+    rpc = FakeRPC(text="日本語の相談をします。" * 2000)
     snapshot = await capture(rpc, "s")
     original = snapshot.raw_json
     gen = Generator(rpc, Settings(endpoint="ws://localhost"))
@@ -245,12 +245,13 @@ async def test_context_retry_uses_same_snapshot_and_fresh_helper(monkeypatch):
         attempts.append(prompt)
         if len(attempts) == 1:
             rpc.turns.append(turn(2, "LATER USER INPUT MUST NOT ENTER"))
-            raise RpcError("contextWindowExceeded")
-        return "Title"
+            raise GenerationFailure({"codexErrorInfo": "contextWindowExceeded"})
+        return "日本語の相談"
 
     gen.attempt = attempt
-    assert await gen.generate(snapshot) == "Title"
+    assert await gen.generate(snapshot) == "日本語の相談"
     assert len(attempts) == 2
+    assert len(attempts[1]) < len(attempts[0])
     assert snapshot.raw_json == original
     assert all("LATER USER INPUT" not in p for p in attempts)
 
@@ -301,3 +302,108 @@ async def test_session_reinitializes_without_adopting_historical_threads():
     assert "historical" in m.known
     assert "historical" not in m.candidates
     assert not rpc.listeners
+
+
+async def test_approximate_path_generates_and_reads_back(monkeypatch):
+    def unsupported(_):
+        raise KeyError("unknown")
+
+    monkeypatch.setattr("tiktoken.encoding_for_model", unsupported)
+    rpc = FakeRPC()
+    m = monitor(rpc)
+    await m.process("s")
+    assert m.candidates["s"].done
+    assert rpc.name == "Build the interface"
+    assert rpc.helpers == 2
+    assert rpc.calls[-1][0] == "thread/read"
+    assert m.generator.last_discovery["context_limit"] == 32000
+
+
+async def test_generate_defers_without_context_even_with_approximation(monkeypatch):
+    def unsupported(_):
+        raise KeyError("unknown")
+
+    monkeypatch.setattr("tiktoken.encoding_for_model", unsupported)
+    rpc = FakeRPC(window=None)
+    m = monitor(rpc)
+    await m.process("s")
+    assert not m.candidates["s"].done
+    assert rpc.helpers == 1
+    assert m.candidates["s"].snapshot is not None
+    assert not any(k == "thread/name/set" for k, _ in rpc.calls)
+
+
+@pytest.mark.parametrize(
+    "info", ["unauthorized", "modelNotFound", "connectionFailed", None]
+)
+async def test_unrelated_failures_do_not_context_retry(info):
+    rpc = FakeRPC()
+    m = monitor(rpc)
+    attempts = []
+
+    async def attempt(prompt, probe=False, **kwargs):
+        if probe:
+            return 32000, 200
+        attempts.append(prompt)
+        raise GenerationFailure(
+            {"codexErrorInfo": info, "message": "contextWindowExceeded in quoted text"}
+        )
+
+    m.generator.attempt = attempt
+    await m.process("s")
+    assert len(attempts) == 1
+
+
+async def test_server_retry_notification_does_not_duplicate_helpers():
+    class RetryingRPC(FakeRPC):
+        async def request(self, method, params=None):
+            if method == "turn/start":
+                self.emit(
+                    "error",
+                    {
+                        "threadId": params["threadId"],
+                        "turnId": "t",
+                        "willRetry": True,
+                        "error": {"codexErrorInfo": "contextWindowExceeded"},
+                    },
+                )
+            return await super().request(method, params)
+
+    rpc = RetryingRPC()
+    m = monitor(rpc)
+    await m.process("s")
+    assert rpc.helpers == 2
+    assert m.candidates["s"].done
+
+
+async def test_own_name_broadcast_keeps_worker_alive_for_readback():
+    class EchoRPC(FakeRPC):
+        async def request(self, method, params=None):
+            result = await super().request(method, params)
+            if method == "thread/name/set":
+                self.emit(
+                    "thread/name/updated", {"threadId": "s", "threadName": self.name}
+                )
+            return result
+
+    rpc = EchoRPC()
+    m = monitor(rpc)
+    rpc.listeners.add(m.event)
+    job = asyncio.create_task(m.process("s"))
+    m.jobs["s"] = job
+    await job
+    assert m.candidates["s"].done
+    assert rpc.calls[-1][0] == "thread/read"
+
+
+async def test_japanese_language_guard_ignores_english_code_before_rename():
+    rpc = FakeRPC(
+        text="処理速度を改善したいです。計測方法について相談します。\n```python\n"
+        + 'logger.info("Waiting for worker completion")\n' * 100
+        + "```"
+    )
+    m = monitor(rpc)
+    await m.process("s")
+    assert m.candidates["s"].snapshot is not None
+    assert not m.candidates["s"].done
+    assert not any(k == "thread/name/set" for k, _ in rpc.calls)

@@ -172,19 +172,29 @@ class Monitor:
                 candidate.snapshot = None
             raise
         except SourceRunning as exc:
+            if candidate.done:
+                return
             if candidate.capture_deadline is None:
                 candidate.capture_deadline = time.monotonic() + 5
             candidate.phase, candidate.reason = "source_delay", str(exc)[:1000]
         except Waiting as exc:
+            if candidate.done:
+                return
             candidate.phase, candidate.reason = "waiting", str(exc)[:1000]
         except Exhausted as exc:
+            if candidate.done:
+                return
             candidate.finish("exhausted", str(exc))
         except (Deferred, ValueError) as exc:
+            if candidate.done:
+                return
             if candidate.rename_uncertain:
                 candidate.phase, candidate.reason = "reconciling", str(exc)[:1000]
             else:
                 candidate.finish("unsupported", str(exc))
         except Exception as exc:
+            if candidate.done:
+                return
             candidate.failures += 1
             candidate.reason = str(exc)[:1000]
             # An unresolved write is reconciled with reads only. Keep compact intent,

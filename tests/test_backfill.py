@@ -1,4 +1,5 @@
 import asyncio
+import json
 from contextlib import asynccontextmanager
 
 import pytest
@@ -7,6 +8,9 @@ from test_workflow import FakeRPC
 from codex_auto_title.backfill import Backfill
 from codex_auto_title.cli import load
 from codex_auto_title.config import Settings
+from codex_auto_title.generation import Generator
+from codex_auto_title.history import Deferred, SourceRunning, Waiting
+from codex_auto_title.lifecycle import Exhausted
 from codex_auto_title.rpc import Disconnected
 
 
@@ -241,3 +245,102 @@ async def test_worker_limit(monkeypatch):
     await b.session(ScanRPC([[thread(str(i)) for i in range(8)]]))
     assert maximum == 2
     assert all(c.done for c in b.candidates.values())
+
+
+@pytest.mark.parametrize("stage", ["read", "generation"])
+@pytest.mark.parametrize(
+    "failure",
+    [None, Disconnected, SourceRunning, Waiting, Exhausted, Deferred, ValueError],
+)
+async def test_manual_name_cancels_inflight_work_and_preserves_outcome(
+    stage, failure, monkeypatch, capsys
+):
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def outstanding():
+        entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            if failure is not None:
+                # An operation may fail during cancellation/cleanup after the
+                # notification has already made the candidate terminal.
+                raise failure("late operation failure") from None
+            raise
+
+    class RenamedRPC(ScanRPC):
+        async def request(self, method, params=None):
+            if method == "thread/read" and params["threadId"] == "other":
+                self.calls.append((method, params))
+                return {"thread": thread("other", name="Existing other name")}
+            if stage == "read" and method == "thread/turns/list":
+                await outstanding()
+            return await super().request(method, params)
+
+    async def generate(self, snapshot, attempts):
+        await outstanding()
+
+    if stage == "generation":
+        monkeypatch.setattr(Generator, "generate", generate)
+    rpc = RenamedRPC([[thread("s"), thread("other")]])
+    b = backfill(workers=1)
+    session = asyncio.create_task(b.session(rpc))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert "s" in b.jobs
+        rpc.name = "Manual name"
+        rpc.emit(
+            "thread/name/updated", {"threadId": "s", "threadName": rpc.name}
+        )
+        await asyncio.wait_for(session, 1)
+    finally:
+        session.cancel()
+        await asyncio.gather(session, return_exceptions=True)
+
+    assert cancelled.is_set()
+    assert rpc.name == "Manual name"
+    assert not any(k == "thread/name/set" for k, _ in rpc.calls)
+    c = b.candidates["s"]
+    assert c.done and c.phase == "named_elsewhere"
+    assert c.snapshot is None and not c.rename_uncertain
+    assert c.failures == 0 and c.reason is None
+    # The same worker must continue after candidate cancellation.
+    assert b.candidates["other"].phase == "ineligible"
+    assert not b.jobs
+    assert not rpc.listeners
+    assert b.report() == 0
+    output = capsys.readouterr().out
+    assert "skipped thread=s:" in output
+    summary = json.loads(output.splitlines()[-1])
+    assert summary["skipped"] == 2
+    assert summary["unresolved"] == summary["failed"] == summary["deferred"] == 0
+
+
+async def test_batch_cancellation_still_propagates():
+    entered = asyncio.Event()
+
+    class BlockingRPC(ScanRPC):
+        async def request(self, method, params=None):
+            if method == "thread/turns/list":
+                entered.set()
+                await asyncio.Future()
+            return await super().request(method, params)
+
+    b = backfill(workers=1)
+    rpc = BlockingRPC()
+    session = asyncio.create_task(b.session(rpc))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        job = b.jobs["s"]
+        session.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(session, 1)
+        assert job.cancelled()
+        assert not b.jobs
+        assert not rpc.listeners
+        assert not b.candidates["s"].done
+    finally:
+        session.cancel()
+        await asyncio.gather(session, return_exceptions=True)

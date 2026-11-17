@@ -69,7 +69,16 @@ class Backfill(Monitor):
             c = self.candidates[tid]
             reconciliation = 0
             while not c.done:
-                await self.process(tid)
+                job = self.jobs[tid] = asyncio.create_task(self.process(tid))
+                try:
+                    await job
+                except asyncio.CancelledError:
+                    # A manual rename cancels only this candidate's job. Batch
+                    # shutdown must still propagate through the worker.
+                    if asyncio.current_task().cancelling() or not c.done:
+                        raise
+                finally:
+                    del self.jobs[tid]
                 if c.done:
                     break
                 if c.rename_uncertain:

@@ -3,6 +3,7 @@ import json
 import time
 
 import pytest
+from structlog.testing import capture_logs
 
 from codex_titler.config import Settings
 from codex_titler.daemon import Monitor
@@ -634,10 +635,15 @@ async def test_once_interruption_closes_workers_transport_and_state(settings, mo
     state = State()
     monkeypatch.setattr(daemon, "Rpc", lambda _: rpc)
     monkeypatch.setattr(cli, "State", lambda: state)
-    task = asyncio.create_task(cli.run(settings, once=True))
-    await asyncio.wait_for(entered.wait(), 1)
-    task.cancel()
-    assert await asyncio.wait_for(task, 1) == 130
+    with capture_logs() as events:
+        task = asyncio.create_task(cli.run(settings, once=True))
+        await asyncio.wait_for(entered.wait(), 1)
+        task.cancel()
+        assert await asyncio.wait_for(task, 1) == 130
+    summaries = [event for event in events if event["event"] == "scan_completed"]
+    assert len(summaries) == 1
+    assert summaries[0]["interrupted"] is True
+    assert summaries[0]["exit_code"] == 130
     assert rpc.closes == 1 and not rpc.listeners
     assert any(m == "thread/unsubscribe" for m, _ in rpc.calls)
     with pytest.raises(ValueError, match="no active connection"):

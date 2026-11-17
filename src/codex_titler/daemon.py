@@ -23,9 +23,12 @@ class ScanResult:
     unresolved: int = 0
     errors: int = 0
     scan_complete: bool = False
+    interrupted: bool = False
 
     @property
     def exit_code(self):
+        if self.interrupted:
+            return 130
         return int(not self.scan_complete or bool(self.failed or self.unresolved or self.errors))
 
     def log(self):
@@ -269,7 +272,7 @@ async def scan_once(settings, state):
         log.info("connected", server=rpc.server_info)
         await Monitor(Api(rpc, settings), state, settings, once=True, result=result).run_once()
     except asyncio.CancelledError:
-        result.errors += 1
+        result.interrupted = True
         raise
     except Exception as exc:
         result.errors += 1

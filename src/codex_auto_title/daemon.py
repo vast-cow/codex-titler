@@ -96,7 +96,12 @@ class Monitor:
         cancelled = False
         try:
             t = await self.metadata(tid)
-            if t.get("ephemeral") is not False or t["name"] is not None:
+            if (
+                t.get("ephemeral") is not False
+                or t.get("forkedFromId")
+                or t.get("parentThreadId")
+                or t["name"] is not None
+            ):
                 candidate.finish(
                     "named"
                     if candidate.title is not None and candidate.title == t["name"]

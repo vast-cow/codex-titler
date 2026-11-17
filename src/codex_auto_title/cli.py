@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from .backfill import Backfill
 from .config import Settings
 from .daemon import Monitor
 
@@ -39,6 +40,12 @@ def load(argv=None):
         "reconnect-max",
     ):
         parser.add_argument("--" + name, type=float)
+    parser.add_argument(
+        "--backfill-once",
+        action="store_true",
+        default=None,
+        help="title eligible existing unarchived threads once, then exit",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = vars(parser.parse_args(argv))
     verbose, path = args.pop("verbose"), args.pop("config")
@@ -58,6 +65,8 @@ def main():
     )
     try:
         settings.headers()
+        if settings.backfill_once:
+            raise SystemExit(asyncio.run(Backfill(settings).run()))
         asyncio.run(Monitor(settings).run())
     except KeyboardInterrupt:
         pass

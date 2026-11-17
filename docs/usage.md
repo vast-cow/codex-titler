@@ -67,3 +67,58 @@ uv run python tools/verify_live.py --endpoint unix:///absolute/path/to/app-serve
 ```
 
 Use the same endpoint as the intended UI; the script verifies broadcast detection across two real client connections, Japanese title script, frozen snapshot and name readback. Its Japanese-script check is a sanity check, not a universal language classifier. It does not prove notifications from an unrelated server or UI connection.
+
+
+## One-time backfill
+
+```sh
+uv run codex-auto-title --endpoint unix:///absolute/path/to/app-server.sock --backfill-once
+# Or use your existing --config FILE with --backfill-once.
+```
+
+This opt-in command connects to the configured existing server, collects all pages
+of `thread/list` with `archived: false`, deduplicates IDs, then processes that fixed
+population with at most `workers` concurrent jobs. It includes historical threads
+regardless of startup timestamp or known IDs. It does not enroll `thread/started`
+events or run a second scan. Archived threads are excluded; nothing is unarchived.
+The scan sees only what that server, account, provider/source defaults and access
+permissions expose. It does not search other servers, accounts, or local files.
+Pagination is a moving server view, not an atomic snapshot: threads created or
+changed during traversal may appear or be missed. After enumeration, new threads
+are outside this run.
+
+Only a metadata read with an explicitly null name permits generation. Existing
+names, including empty strings, are preserved. Ephemeral helpers, forks, children,
+and unknown ephemeral status are excluded. The same full history capture, one-time
+five-second running-source delay, language selection, title validation, Luna/low
+helpers, concurrency and candidate retry budgets apply. Source threads are only
+read and, if still eligible, renamed. A final name reread protects concurrent
+manual renames subject to the API's residual read/write race.
+
+Empty/nontext or unmaterialized history is deferred immediately instead of polled
+forever. Unsupported history/configuration is deferred; exhausted retry budgets
+are failed. Connection/initialization attempts are capped by `transient_failures`,
+with exponential delays capped by `reconnect_max`. Once initialized, this mode
+does not reconnect or rescan after connection loss: remaining jobs exhaust their
+bounded requests or report unresolved writes. At most `transient_failures`
+unsuccessful uncertain-write reconciliation passes are allowed per thread.
+Reconciliation reads the current name before any further write; an explicit null
+can permit a bounded retry of the retained title, while any non-null name resolves
+the outcome without replay. No name write is blindly replayed.
+
+If enumeration fails (including repeated cursors or `max_pages` exhaustion), no
+threads are renamed; discovered candidates are reported as deferred. The summary
+marks `enumeration_complete: false`, and `scanned` is only the unique IDs observed.
+On complete enumeration, `scanned` counts all unique returned IDs; `eligible`
+counts threads observed with explicit null names and supported thread type in
+metadata. It can include threads later manually named or deferred. The terminal
+counts `renamed`, `skipped`, `deferred`, `failed`, and `unresolved` partition scanned
+threads. Non-renamed outcomes print an ID and concise reason, followed by a JSON
+summary. Missing metadata may prevent eligibility from being established.
+
+Exit status is **0** when enumeration completed and every thread was renamed or
+skipped; **1** indicates incomplete enumeration, connection failure, deferred,
+failed, or unresolved work. CLI/configuration errors use argparse's status **2**.
+There is no persisted run state. Running the command again scans again and
+preserves any names already set. See [behavior](behavior.md#one-time-backfill-mode)
+for limitations.

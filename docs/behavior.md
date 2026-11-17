@@ -6,7 +6,7 @@
 
 Only explicitly null current names are eligible. Empty strings count as names. Missing names after a metadata read cause deferral. The monitor rereads metadata and all available full-detail history for candidates. Empty/nontext-only user input defers. If no source turn is running when first checked, full history with meaningful textual user input permits immediate generation. On first observing an `inProgress` source turn, the candidate records a monotonic deadline five seconds later and discards the preliminary history. At that deadline it begins a fresh read-only history capture, even if the source turn is still running or has completed during the wait. This one-time delay is never shortened, reset or extended by completion, new source activity, retries or reconnects in the same daemon process. The utility does not attempt OCR, audio transcription or external-file loading.
 
-In Codex 0.169.0, `thread/started` is broadcast to initialized clients of that server; live turn items and completion events are sent to thread subscribers. The utility never resumes, subscribes to, interrupts or sends turns to **source** threads. It reads only registered candidates for history and current names. Reconnect repeats initialization, retains registered candidate IDs, captured snapshots and uncertain rename intents in memory, and resumes read-only polling. It does not adopt threads created entirely while disconnected. Restart establishes a fresh baseline; state is not persisted. No API scan turns historical unnamed threads into rename candidates. Other server processes and inaccessible remote history are outside the monitored scope.
+In Codex 0.169.0, `thread/started` is broadcast to initialized clients of that server; live turn items and completion events are sent to thread subscribers. The utility never resumes, subscribes to, interrupts or sends turns to **source** threads. It reads only registered candidates for history and current names. Reconnect repeats initialization, retains registered candidate IDs, captured snapshots and uncertain rename intents in memory, and resumes read-only polling. It does not adopt threads created entirely while disconnected. Restart establishes a fresh baseline; state is not persisted. In default monitoring mode, no API scan turns historical unnamed threads into rename candidates. Other server processes and inaccessible remote history are outside the monitored scope.
 
 One worker per source ID, bounded by `workers`, owns its snapshot and rename intent. Name-update notifications cancel active jobs, except a notification matching the retained generated title or arriving during an uncertain write keeps the worker alive for name readback. Subscriber-only or missed notifications are covered by the final metadata reread. A successful manual rename discards generated output. Codex 0.169.0 has no conditional name-set field: a residual race exists between the reread and `thread/name/set` if another client renames concurrently. Ambiguous writes retain their intended title and reread the name before any later action. A non-null result is accepted without replay; acknowledged writes are also read back before marking the worker complete, and a different non-null name is preserved; if it is still explicitly null a subsequent attempt can set the retained title. No mutation is blindly retried by the RPC client.
 
@@ -104,3 +104,28 @@ server tool requests) are also bounded. A timeout after attempting `thread/name/
 is uncertain even when the send was blocked; the retained intent is reconciled
 before any further write. Initialization and handshakes remain independently
 bounded, and generation has its own terminal-turn timeout.
+
+
+## One-time backfill mode
+
+`--backfill-once` replaces monitoring with a finite unarchived `thread/list`
+traversal and a fixed deduplicated candidate set. Historical IDs bypass the
+monitor's startup-time and known-ID gates. All other source safety and generation
+rules above apply. Enumeration must finish successfully before any title work
+starts. List metadata excludes known helpers/forks/children; current metadata
+rechecks thread type and explicit-null name before capture. Names are reread
+immediately before mutation, and ambiguous mutations retain their intent for
+bounded readback using the same workflow.
+
+This mode terminates no-input waits and bounds otherwise indefinite connection
+and reconciliation retries. The existing running-source capture delay is retained.
+The scan and each history retrieval use `max_pages`; individual RPCs and helper
+turns retain their existing timeouts. Runtime therefore depends on population size,
+history size and configured budgets, rather than waiting for future user input.
+No atomic population/history snapshot or conditional name update is supplied by
+the server. A manual rename between final read and write remains a race; missing
+broadcasts are covered only up to the final metadata reread. Server-side helper
+cleanup can remain incomplete after a disconnect. There is no live-server
+verification of this mode in the automated suite.
+
+See [usage, scope, summary counts and exit status](usage.md#one-time-backfill).

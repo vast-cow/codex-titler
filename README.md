@@ -5,9 +5,12 @@ Python 3.12+ utility for naming new, unnamed threads on an **existing** Codex Ap
 ```sh
 uv sync --locked
 uv run codex-auto-title --endpoint unix:///absolute/path/to/app-server.sock
+uv run codex-auto-title --endpoint unix:///absolute/path/to/app-server.sock --backfill-once
 uv run codex-auto-title --endpoint ws://127.0.0.1:4500
 uv run codex-auto-title --endpoint wss://codex.example.com --token-env CODEX_SERVER_TOKEN
 ```
+
+Use `--backfill-once` to title eligible existing unarchived threads and exit; continuous monitoring remains the default. See [backfill scope and exit status](docs/usage.md#one-time-backfill).
 
 The Unix listener must speak WebSocket, including HTTP Upgrade. It is not a JSON-lines socket. The utility never starts another server. `wss://` uses certificate verification.
 

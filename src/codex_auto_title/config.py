@@ -9,6 +9,7 @@ MODEL = "gpt-6-luna"
 
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    backfill_once: bool = False
     endpoint: str
     unix_uri: str = "ws://localhost/"
     token_env: str | None = None

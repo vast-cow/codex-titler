@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -314,7 +315,8 @@ async def test_reconnect_repeats_full_scan(settings, state, monkeypatch):
     assert all(sum(m == "thread/list" for m, _ in rpc.calls) == 4 for rpc in connections)
 
 
-async def test_failed_acquisition_never_generates(settings, state):
+async def test_failed_acquisition_never_generates(settings, state, monkeypatch):
+    settings.cooldown = 300
     rpc = Fake()
     rpc.fail_page = True
     monitor = Monitor(Api(rpc, settings), state, settings)
@@ -322,7 +324,8 @@ async def test_failed_acquisition_never_generates(settings, state):
         await monitor.repair("source")
     assert rpc.helper_count == 0
     assert not await state.allowed("source", rpc.name)
-    await asyncio.sleep(0.02)
+    after_cooldown = time.time() + settings.cooldown + 1
+    monkeypatch.setattr("codex_titler.state.time.time", lambda: after_cooldown)
     assert await state.allowed("source", rpc.name)
 
 
@@ -416,3 +419,247 @@ async def test_uncertain_creation_not_replayed(settings, state):
     with pytest.raises(TimeoutError):
         await gen.generate(await gen.api.snapshot("source"), rpc.name)
     assert rpc.helper_count == 1
+
+
+async def test_once_backpressure_dedup_filter_and_drain(settings, state):
+    settings.queue_size = 1
+    settings.concurrency = 2
+    rpc = Fake()
+    api = Api(rpc, settings)
+    rows = [Thread(id=str(i), name=rpc.name) for i in range(12)]
+    rows += [
+        rows[0],
+        Thread(id="short", name="short"),
+        Thread(id="missing"),
+        Thread(id="ephemeral", name=rpc.name, ephemeral=True),
+        Thread(id="own", name=rpc.name),
+    ]
+    await state.helper("own")
+
+    async def threads():
+        for row in rows:
+            yield row
+
+    api.threads = threads
+    monitor = Monitor(api, state, settings, once=True)
+    entered, release = asyncio.Event(), asyncio.Event()
+    finished = []
+    active = maximum = 0
+
+    async def repair(thread_id):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(active, maximum)
+        entered.set()
+        await release.wait()
+        # Neither notifications nor explicit scheduling can extend a one-shot run.
+        monitor.notification("thread/name/updated", {"threadId": "extra"})
+        monitor.schedule(thread_id)
+        await asyncio.sleep(0)
+        finished.append(thread_id)
+        active -= 1
+        return "renamed"
+
+    monitor.repair = repair
+    task = asyncio.create_task(monitor.run_once())
+    await entered.wait()
+    await asyncio.sleep(0.02)
+    assert not task.done()
+    assert monitor.queue.qsize() == 1
+    release.set()
+    await asyncio.wait_for(task, 2)
+    assert set(finished) == {str(i) for i in range(12)}
+    assert len(finished) == 12 and maximum == 2
+    assert monitor.result.scanned == 16
+    assert monitor.result.renamed == 12 and monitor.result.skipped == 4
+    assert monitor.result.exit_code == 0
+    assert not monitor.pending and not monitor.active and not monitor.dirty
+
+
+@pytest.mark.parametrize(
+    "mode,code",
+    [
+        ("normal", 0),
+        ("dry", 0),
+        ("stale", 0),
+        ("cooldown", 0),
+        ("empty", 0),
+        ("short", 0),
+        ("scan_failure", 1),
+        ("worker_failure", 1),
+        ("lost", 1),
+        ("uncertain", 1),
+        ("confirmed", 0),
+        ("setup_failure", 1),
+    ],
+)
+async def test_once_pipeline_exit_and_cleanup(settings, state, monkeypatch, mode, code):
+    from codex_titler import daemon
+
+    class Connection(Fake):
+        server_info = {}
+        closes = 0
+
+        async def open(self):
+            if mode == "setup_failure":
+                raise ConnectionError("cannot connect")
+
+        async def close(self):
+            self.closes += 1
+            self.closed.set()
+
+        async def call(self, method, params):
+            if method == "thread/list":
+                if mode == "scan_failure" and params["cursor"]:
+                    raise RpcError({"message": "page failed"})
+                if mode == "empty":
+                    self.calls.append((method, params))
+                    return {"data": [], "nextCursor": None}
+            if method == "thread/name/set" and mode == "uncertain":
+                self.calls.append((method, params))
+                raise TimeoutError()
+            if method == "thread/turns/list" and mode == "lost":
+                self.closed.set()
+                raise ConnectionError("lost")
+            return await super().call(method, params)
+
+    rpc = Connection()
+    rpc.fail_page = mode == "worker_failure"
+    rpc.change_title = mode == "stale"
+    rpc.rename_lost = mode == "confirmed"
+    settings.dry_run = mode == "dry"
+    if mode == "short":
+        rpc.name = "short"
+    if mode == "cooldown":
+        job = await state.begin("source", rpc.name)
+        await state.update(job, state="done", outcome="dry_run", next_retry=10**12)
+    monkeypatch.setattr(daemon, "Rpc", lambda _: rpc)
+    assert await asyncio.wait_for(daemon.scan_once(settings, state), 2) == code
+    assert rpc.closes == 1 and not rpc.listeners
+    if mode in ("dry", "stale", "empty", "short", "worker_failure", "lost", "cooldown"):
+        assert not any(m == "thread/name/set" for m, _ in rpc.calls)
+    if mode in ("normal", "dry", "stale", "uncertain", "confirmed"):
+        async with state.db.execute("SELECT outcome FROM jobs") as cur:
+            assert [row[0] for row in await cur.fetchall()] == [
+                {
+                    "normal": "renamed",
+                    "dry": "dry_run",
+                    "stale": "stale",
+                    "uncertain": "write_uncertain",
+                    "confirmed": "rename_confirmed",
+                }[mode]
+            ]
+    if mode == "normal":
+        calls = [p for m, p in rpc.calls if m == "thread/list"]
+        assert [p["archived"] for p in calls] == [False, False, True, True]
+        assert all(p["sourceKinds"] == SOURCES and p["modelProviders"] == [] for p in calls)
+        assert rpc.helper_count == 1  # Duplicate IDs across archive pages are processed once.
+
+
+@pytest.mark.parametrize(
+    "args,once,dry",
+    [
+        ([], False, False),
+        (["--dry-run"], False, True),
+        (["scan", "--once"], True, False),
+        (["scan", "--once", "--dry-run"], True, True),
+        (["--dry-run", "scan", "--once"], True, True),
+    ],
+)
+def test_cli_compatibility(monkeypatch, tmp_path, args, once, dry):
+    import sys
+
+    from codex_titler import cli
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TITLER_CONTEXT_LIMIT", "32000")
+    monkeypatch.setenv("TITLER_DRY_RUN", "false")
+    monkeypatch.setattr(sys, "argv", ["codex-titler", *args])
+
+    async def run(settings, *, once=False):
+        assert once == expected_once
+        assert settings.dry_run == dry
+        return 0
+
+    expected_once = once
+    monkeypatch.setattr(cli, "run", run)
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 0
+
+
+async def test_once_stale_long_title_is_not_rescheduled(settings, state):
+    rpc = Fake()
+    original_call = rpc.call
+
+    async def call(method, params):
+        result = await original_call(method, params)
+        if method == "turn/start":
+            rpc.name = "Another eligible title " * 12
+            rpc.emit("thread/name/updated", threadId="source")
+        return result
+
+    rpc.call = call
+    monitor = Monitor(Api(rpc, settings), state, settings, once=True)
+    await asyncio.wait_for(monitor.run_once(), 1)
+    assert monitor.result.skipped == 2  # One stale source and one ephemeral helper.
+    assert monitor.result.exit_code == 0
+    assert rpc.helper_count == 1 and not monitor.dirty
+    assert not any(m == "thread/name/set" for m, _ in rpc.calls)
+
+
+async def test_once_interruption_closes_workers_transport_and_state(settings, monkeypatch):
+    from codex_titler import cli, daemon
+
+    entered = asyncio.Event()
+
+    class Connection(Fake):
+        server_info = {}
+        closes = 0
+
+        async def open(self):
+            pass
+
+        async def close(self):
+            self.closes += 1
+            self.closed.set()
+
+        async def call(self, method, params):
+            if method == "turn/start":
+                entered.set()
+                await asyncio.Future()
+            return await super().call(method, params)
+
+    rpc = Connection()
+    state = State()
+    monkeypatch.setattr(daemon, "Rpc", lambda _: rpc)
+    monkeypatch.setattr(cli, "State", lambda: state)
+    task = asyncio.create_task(cli.run(settings, once=True))
+    await asyncio.wait_for(entered.wait(), 1)
+    task.cancel()
+    assert await asyncio.wait_for(task, 1) == 130
+    assert rpc.closes == 1 and not rpc.listeners
+    assert any(m == "thread/unsubscribe" for m, _ in rpc.calls)
+    with pytest.raises(ValueError, match="no active connection"):
+        await state.db.execute("SELECT 1")
+
+
+@pytest.mark.parametrize("code", [0, 1, 130])
+def test_cli_exit_and_environment_dry_run(monkeypatch, tmp_path, code):
+    import sys
+
+    from codex_titler import cli
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TITLER_CONTEXT_LIMIT", "32000")
+    monkeypatch.setenv("TITLER_DRY_RUN", "true")
+    monkeypatch.setattr(sys, "argv", ["codex-titler", "scan", "--once"])
+
+    async def run(settings, *, once=False):
+        assert once and settings.dry_run
+        return code
+
+    monkeypatch.setattr(cli, "run", run)
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == code

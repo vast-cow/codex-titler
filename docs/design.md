@@ -16,7 +16,8 @@ text and attachment references remain in canonical JSON. Exact duplicate records
 removed; distinct versions sharing IDs survive in acquisition order. An intermediate failure
 produces no snapshot and no generation. References/paths are never opened as files by the daemon.
 Later conversation appends do not invalidate or merge into a job's frozen snapshot. A changed
-explicit title does invalidate the candidate and schedules reevaluation.
+explicit title does invalidate the candidate and schedules reevaluation in daemon mode.
+One-shot mode records a stale outcome and finishes that ID without reevaluation.
 
 ## Input policy
 
@@ -49,3 +50,9 @@ invalid output and unsupported effort; uncertain rename read-back; and restart r
 Transport tests use local TCP and Unix WebSocket servers to exercise actual framing, initialization,
 large messages, additive events, server-request rejection and pending-request connection loss.
 These tests do not rename real Codex threads. See protocol.md for unrun live checks.
+
+One-shot tests additionally cover queue backpressure beyond capacity, ID deduplication,
+eligibility and persisted helper/cooldown filtering, draining queued and in-flight jobs,
+dry-run without rename calls, empty/no-work scans, partial enumeration failure, worker
+errors, connection loss, uncertain and confirmed writes, stale-title finite completion,
+transport cleanup, and backward-compatible CLI flag/configuration handling.

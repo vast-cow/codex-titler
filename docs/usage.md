@@ -1,6 +1,10 @@
 # Usage and configuration
 
-Install Python 3.12+ and uv, then run `uv sync --locked`. The lock includes runtime and separate development dependencies; `uv sync --locked --no-dev` installs runtime only. The executable is `codex-auto-title`.
+Use Python 3.12 or later and follow the [installation instructions for uv or venv and pip](../README.md#installation).
+
+For a locked runtime-only installation with uv, run `uv sync --locked --no-dev`.
+
+With the virtual environment activated, run the `uv run codex-auto-title …` examples as `codex-auto-title …`. If you use uv without activating the environment, prefix the direct `codex-auto-title` examples with `uv run`.
 
 Connect to the same listening App Server process used by the UI whose threads should be observed. Sharing a Codex home directory with an unrelated server does not supply its live notifications. This utility does not start a server or discover UI connections automatically.
 

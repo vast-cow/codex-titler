@@ -27,7 +27,7 @@ Run the examples below with uv, or omit `uv run` if you activated the virtual en
 ```sh
 uv run codex-auto-title --endpoint unix:///absolute/path/to/app-server.sock
 uv run codex-auto-title --endpoint unix:///absolute/path/to/app-server.sock --backfill-once
-uv run codex-auto-title --endpoint ws://127.0.0.1:4500
+uv run codex-auto-title
 uv run codex-auto-title --endpoint wss://codex.example.com --token-env CODEX_SERVER_TOKEN
 ```
 

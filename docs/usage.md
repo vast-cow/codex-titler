@@ -34,12 +34,15 @@ max_pages = 10000
 ```
 
 ```sh
+codex-auto-title
 codex-auto-title --config titler.toml
 codex-auto-title --config titler.toml --endpoint ws://127.0.0.1:4500
 codex-auto-title --endpoint wss://codex.example.com --token-env CODEX_SERVER_TOKEN
 ```
 
-Configuration is validated with Pydantic; unknown keys and invalid values fail early. CLI values override TOML values, which override defaults. All settings except `endpoint` have defaults. Use `--help` for CLI switches. There is deliberately no model or effort override.
+Running `codex-auto-title` without arguments connects to `ws://127.0.0.1:4500`. The CLI `--endpoint` takes precedence over `[titler].endpoint` in the TOML file, and the default URL is used when both are omitted.
+
+Configuration is validated with Pydantic; unknown keys and invalid values fail early. CLI values override TOML values, which override defaults. Use `--help` for CLI switches. There is deliberately no model or effort override.
 
 `ephemeral_project_path` sets the project directory for every ephemeral helper,
 including context-limit probes and title-generation attempts in both continuous

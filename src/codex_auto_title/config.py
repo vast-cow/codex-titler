@@ -11,7 +11,7 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     backfill_once: bool = False
     backfill_order: Literal["newest-first", "oldest-first"] = "newest-first"
-    endpoint: str
+    endpoint: str = "ws://127.0.0.1:4500"
     unix_uri: str = "ws://localhost/"
     token_env: str | None = None
     provider: str = "openai"

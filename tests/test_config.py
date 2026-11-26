@@ -5,6 +5,18 @@ from codex_auto_title.cli import load
 from codex_auto_title.config import Settings
 
 
+def test_endpoint_defaults_without_arguments():
+    settings, _ = load([])
+    assert settings.endpoint == "ws://127.0.0.1:4500"
+
+
+def test_endpoint_from_toml_without_cli_override(tmp_path):
+    path = tmp_path / "titler.toml"
+    path.write_text('[titler]\nendpoint = "ws://localhost:4600"\n')
+    settings, _ = load(["--config", str(path)])
+    assert settings.endpoint == "ws://localhost:4600"
+
+
 def test_config_precedence_and_auth(tmp_path, monkeypatch):
     path = tmp_path / "titler.toml"
     path.write_text(
